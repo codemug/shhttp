@@ -1,20 +1,20 @@
 package main
 
-import "time"
-
 type Executable struct {
-	Command  string
-	Args     []string
-	ExecPath string
-	Stdin    string
-	Shell    bool
+	Command string
+	Args    []string
+	BaseDir string
+	Stdin   string
+	Shell   bool
 }
 
 type ExecResult struct {
-	Executable Executable
+	Executable *Executable
 	Stdout     string
 	Stderr     string
 	ExitCode   int
+	Start      int64
+	End        int64
 }
 
 type Status string
@@ -27,10 +27,11 @@ const (
 
 type Job struct {
 	Id           string
-	Executions   []ExecResult
+	Executions   []*ExecResult
 	Status       Status
-	Created      time.Time
-	LastModified time.Time
+	Created      int64
+	LastModified int64
+	IgnoreErrors bool
 }
 
 type IdsResponse struct {

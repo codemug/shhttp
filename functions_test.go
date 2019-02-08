@@ -7,7 +7,7 @@ import (
 
 func TestFileBasedJobStore_SaveNewJob(t *testing.T) {
 	job := Job{
-		Executions: []ExecResult{{Executable: Executable{Command: "echo", Args: []string{"abc"}}}},
+		Executions: []*ExecResult{{Executable: &Executable{Command: "echo", Args: []string{"abc"}}}},
 		Status:     InProgress,
 	}
 	store := FileBasedJobStore{BasePath: "testing"}
@@ -25,7 +25,7 @@ func TestFileBasedJobStore_SaveNewJob(t *testing.T) {
 
 func TestFileBasedJobStore_UpdateJob(t *testing.T) {
 	job := Job{
-		Executions: []ExecResult{{Executable: Executable{Command: "echo", Args: []string{"abc"}}}},
+		Executions: []*ExecResult{{Executable: &Executable{Command: "echo", Args: []string{"abc"}}}},
 		Status:     InProgress,
 	}
 	store := FileBasedJobStore{BasePath: "testing"}
@@ -40,7 +40,7 @@ func TestFileBasedJobStore_UpdateJob(t *testing.T) {
 
 func TestFileBasedJobStore_GetIds(t *testing.T) {
 	job := Job{
-		Executions: []ExecResult{{Executable: Executable{Command: "echo", Args: []string{"abc"}}}},
+		Executions: []*ExecResult{{Executable: &Executable{Command: "echo", Args: []string{"abc"}}}},
 		Status:     InProgress,
 	}
 	store := FileBasedJobStore{BasePath: "testing"}
@@ -56,11 +56,11 @@ func TestFileBasedJobStore_GetIds(t *testing.T) {
 
 func TestFileBasedJobStore_ClearFinished(t *testing.T) {
 	job1 := Job{
-		Executions: []ExecResult{{Executable: Executable{Command: "echo", Args: []string{"abc"}}}},
+		Executions: []*ExecResult{{Executable: &Executable{Command: "echo", Args: []string{"abc"}}}},
 		Status:     Done,
 	}
 	job2 := Job{
-		Executions: []ExecResult{{Executable: Executable{Command: "echo", Args: []string{"abc"}}}},
+		Executions: []*ExecResult{{Executable: &Executable{Command: "echo", Args: []string{"abc"}}}},
 		Status:     InProgress,
 	}
 	store := FileBasedJobStore{BasePath: "testing"}
@@ -80,7 +80,7 @@ func TestFileBasedJobStore_UpdateJob_NotExist(t *testing.T) {
 	store := FileBasedJobStore{BasePath: "testing"}
 	job := Job{
 		Id:         store.getNewId(nil),
-		Executions: []ExecResult{{Executable: Executable{Command: "echo", Args: []string{"abc"}}}},
+		Executions: []*ExecResult{{Executable: &Executable{Command: "echo", Args: []string{"abc"}}}},
 		Status:     InProgress,
 	}
 	err := store.UpdateJob(&job)
@@ -100,7 +100,7 @@ func TestFileBasedJobStore_GetJob_NotExist(t *testing.T) {
 }
 
 func TestExecute(t *testing.T) {
-	toExecute := ExecResult{Executable: Executable{
+	toExecute := ExecResult{Executable: &Executable{
 		Command: "echo",
 		Args:    []string{"\"Will the real slim shady please stand up\""},
 	}}
@@ -110,7 +110,7 @@ func TestExecute(t *testing.T) {
 }
 
 func TestExecute_NotExist(t *testing.T) {
-	toExecute := ExecResult{Executable: Executable{
+	toExecute := ExecResult{Executable: &Executable{
 		Command: "echoecho",
 		Args:    []string{"\"Will the real slim shady please stand up\""},
 	}}
@@ -119,7 +119,7 @@ func TestExecute_NotExist(t *testing.T) {
 }
 
 func TestExecute_Shell(t *testing.T) {
-	toExecute := ExecResult{Executable: Executable{
+	toExecute := ExecResult{Executable: &Executable{
 		Command: "echo",
 		Args:    []string{"\"winner\nwinner\nchicken\ndinner\"", "|", "grep", "chicken"},
 		Shell:   true,
@@ -130,7 +130,7 @@ func TestExecute_Shell(t *testing.T) {
 }
 
 func TestExecute_ShellError(t *testing.T) {
-	toExecute := ExecResult{Executable: Executable{
+	toExecute := ExecResult{Executable: &Executable{
 		Command: "echo",
 		Args:    []string{"winner\nwinner\nchicken\ndinner", "|", "grep", "chicken"},
 		Shell:   true,

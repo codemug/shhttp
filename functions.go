@@ -24,12 +24,13 @@ func Execute(result *ExecResult) {
 	if result.Executable.Stdin != "" {
 		command.Stdin = bytes.NewBufferString(result.Executable.Stdin)
 	}
-	if result.Executable.ExecPath != "" {
-		command.Dir = result.Executable.ExecPath
+	if result.Executable.BaseDir != "" {
+		command.Dir = result.Executable.BaseDir
 	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
+	result.Start = time.Now().Unix()
 	if err := command.Run(); err != nil {
 		glog.Error(err)
 		result.Stderr = err.Error()
@@ -41,6 +42,7 @@ func Execute(result *ExecResult) {
 			}
 		}
 	}
+	result.End = time.Now().Unix()
 	result.Stdout = stdout.String()
 	if result.Stderr == "" {
 		result.Stderr = stderr.String()
@@ -119,6 +121,7 @@ func (j FileBasedJobStore) SaveNewJob(job *Job) error {
 func (j FileBasedJobStore) UpdateJob(job *Job) error {
 	j.ensureDirectory()
 	if _, err := os.Stat(j.getFullPath(job.Id)); err == nil {
+
 		return j.saveJob(job)
 	} else if os.IsNotExist(err) {
 		return errors.New("the job with the specified id does not exist")
@@ -204,7 +207,7 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 			writeErrorResponse(err, http.StatusBadRequest, writer)
 			return
 		}
-		result := ExecResult{Executable: executable}
+		result := ExecResult{Executable: &executable}
 		Execute(&result)
 		respData, err := json.Marshal(result)
 		if err != nil {
@@ -325,6 +328,8 @@ func getJob(writer http.ResponseWriter, request *http.Request, jobStore JobStore
 
 func runJob(writer http.ResponseWriter, request *http.Request, job *Job, jobStore JobStore) {
 	writeContentType(writer)
+	job.Created = time.Now().Unix()
+	job.Status = InProgress
 	err := jobStore.SaveNewJob(job)
 	if err != nil {
 		glog.Error(err)
@@ -334,8 +339,9 @@ func runJob(writer http.ResponseWriter, request *http.Request, job *Job, jobStor
 	writer.Write([]byte(getIdResponse(job.Id)))
 	go func() {
 		for _, execution := range job.Executions {
-			Execute(&execution)
-			if execution.ExitCode != 0 {
+			Execute(execution)
+			job.LastModified = time.Now().Unix()
+			if execution.ExitCode != 0 && !job.IgnoreErrors {
 				job.Status = Failed
 				jobStore.UpdateJob(job)
 				return

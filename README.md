@@ -41,4 +41,21 @@ Usage of shhttp:
   -vmodule value
     	comma-separated list of pattern=N settings for file-filtered logging
 ```
+To run the daemon with defaults, simply do `shhttp`  in the shell. 
 
+
+### API: 
+
+Read [Wiki](https://github.com/codemug/shhttp/wiki) for API usage.
+
+### Roadmap:
+
+I'm looking forward to add the following:
+1. A kick-ass UI
+2. Ability to run all tasks in a job concurrently
+3. Ability to blacklist/whitelist certain commands using regexes
+4. Ability to run jobs on a schedule
+
+### Contributions:
+
+Are welcome and encouraged.
