@@ -52,9 +52,10 @@ Read [Wiki](https://github.com/codemug/shhttp/wiki) for API usage.
 
 I'm looking forward to add the following:
 1. A kick-ass UI
-2. Ability to run all tasks in a job concurrently
-3. Ability to blacklist/whitelist certain commands using regexes
-4. Ability to run jobs on a schedule
+2. Dockerfile
+3. Ability to run all tasks in a job concurrently
+4. Ability to blacklist/whitelist certain commands using regexes
+5. Ability to run jobs on a schedule
 
 ### Contributions:
 
