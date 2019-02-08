@@ -354,16 +354,21 @@ func runJob(writer http.ResponseWriter, request *http.Request, job *Job, jobStor
 	}
 	writer.Write([]byte(getIdResponse(job.Id)))
 	go func() {
-		for _, execution := range job.Executions {
-			Execute(execution)
-			job.LastModified = time.Now().Unix()
-			if execution.ExitCode != 0 && !job.IgnoreErrors {
-				job.Status = Failed
-				jobStore.UpdateJob(job)
-				return
+		if job.Executions != nil {
+			for _, execution := range job.Executions {
+				if execution.Executable != nil {
+					Execute(execution)
+					job.LastModified = time.Now().Unix()
+					if execution.ExitCode != 0 && !job.IgnoreErrors {
+						job.Status = Failed
+						jobStore.UpdateJob(job)
+						return
+					}
+					jobStore.UpdateJob(job)
+				}
 			}
-			jobStore.UpdateJob(job)
 		}
+		job.LastModified = time.Now().Unix()
 		job.Status = Done
 		jobStore.UpdateJob(job)
 	}()
