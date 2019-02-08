@@ -247,6 +247,9 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 			writeErrorResponse(err, http.StatusBadRequest, writer)
 			return
 		}
+		if job.Id == "" {
+			job.Id = uuid.New().String()
+		}
 		savedJobStore.SaveNewJob(&job)
 		writer.WriteHeader(http.StatusCreated)
 		writer.Write([]byte(getIdResponse(job.Id)))
