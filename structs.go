@@ -6,6 +6,7 @@ type Executable struct {
 	BaseDir string
 	Stdin   string
 	Shell   bool
+	Env     map[string]string
 }
 
 type ExecResult struct {
@@ -32,6 +33,10 @@ type Job struct {
 	Created      int64
 	LastModified int64
 	IgnoreErrors bool
+}
+
+type Env struct {
+	Env map[string]string
 }
 
 type IdsResponse struct {

@@ -27,6 +27,9 @@ func Execute(result *ExecResult) {
 	if result.Executable.BaseDir != "" {
 		command.Dir = result.Executable.BaseDir
 	}
+	if result.Executable.Env != nil {
+		command.Env = updateEnv(os.Environ(), result.Executable.Env)
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -277,11 +280,24 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 	router.HandleFunc("/v1/saved/{id}", func(writer http.ResponseWriter, request *http.Request) {
 		vars := mux.Vars(request)
 		id := vars["id"]
+
 		job, err := savedJobStore.GetJob(id)
+		job.Id = ""
 		if err != nil {
 			glog.Error(err)
 			writeErrorResponse(err, http.StatusNotFound, writer)
 			return
+		}
+		var env Env
+		err = json.NewDecoder(request.Body).Decode(&env)
+		if err != nil {
+			glog.Error(err)
+		} else {
+			for _, v := range job.Executions {
+				for key, value := range env.Env {
+					v.Executable.Env[key] = value
+				}
+			}
 		}
 		runJob(writer, request, job, jobStore)
 	}).Methods(http.MethodPost)
@@ -351,7 +367,6 @@ func runJob(writer http.ResponseWriter, request *http.Request, job *Job, jobStor
 		job.Status = Done
 		jobStore.UpdateJob(job)
 	}()
-
 }
 
 func writeErrorResponse(err error, status int, writer http.ResponseWriter) {
@@ -365,4 +380,13 @@ func getIdResponse(id string) string {
 
 func writeContentType(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
+}
+
+func updateEnv(existingEnv []string, newVars map[string]string) []string {
+	strArray := make([]string, len(newVars))
+	i := 0
+	for k, v := range newVars {
+		strArray[i] = strings.Join([]string{k, v}, "=")
+	}
+	return append(existingEnv, strArray...)
 }
