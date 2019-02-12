@@ -5,10 +5,27 @@ It's a small HTTP service written in go that can accept different commands and s
 
 ### Installation
 
+
+#### Go based:
+
 You need to install golang and [dep](https://github.com/golang/dep) on your machine. Clone the repo in your gopath/src and do a:
 ```sh
 dep ensure
 go install
+```
+
+#### Docker:
+
+To directly run the docker image:
+
+```
+docker run -p 2112:2112 codemug/shhttp:latest
+```
+
+To build the image from source:
+
+```
+docker build -t codemug/shhttp:latest .
 ```
 
 ### Usage
