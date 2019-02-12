@@ -198,7 +198,7 @@ func (j FileBasedJobStore) DeleteJob(id string) error {
 	}
 }
 
-func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
+func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) (*mux.Router) {
 	router := mux.NewRouter()
 
 	jobQueue := make(chan *Job)
@@ -210,6 +210,35 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 		}
 	}()
 
+	go func() {
+		ids, err := jobStore.GetIds()
+		if err != nil {
+			glog.Error(err)
+			return
+		}
+		for _, id := range ids {
+			job, err := jobStore.GetJob(id)
+			if err != nil {
+				glog.Error(err)
+				continue
+			}
+			if revive {
+				if job.Status == InProgress {
+					glog.V(2).Infof("reviving independent job %+v", *job)
+					go ExecuteJob(job, jobStore)
+				} else if job.Status == Queued {
+					glog.V(2).Infof("queueing job for revival %+v", *job)
+					go func() {
+						jobQueue <- job
+					}()
+				}
+			} else {
+				glog.V(2).Infof("job revival disabled, failing existing job %+v", *job)
+				job.Status = Failed
+				jobStore.UpdateJob(job)
+			}
+		}
+	}()
 
 	getIds := func(writer http.ResponseWriter, request *http.Request, store JobStore) {
 		writeContentType(writer)
