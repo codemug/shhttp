@@ -23,6 +23,7 @@ type Status string
 const (
 	InProgress Status = "IN_PROGRESS"
 	Done       Status = "DONE"
+	Queued     Status = "QUEUED"
 	Failed     Status = "FAILED"
 )
 
@@ -35,7 +36,7 @@ type Job struct {
 	IgnoreErrors bool
 }
 
-type Env struct {
+type RunBody struct {
 	Env map[string]string
 }
 

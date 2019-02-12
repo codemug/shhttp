@@ -201,7 +201,77 @@ func (j FileBasedJobStore) DeleteJob(id string) error {
 func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 	router := mux.NewRouter()
 
-	router.HandleFunc("/v1/exec", func(writer http.ResponseWriter, request *http.Request) {
+	jobQueue := make(chan *Job)
+
+	go func() {
+		for {
+			job := <-jobQueue
+			ExecuteJob(job, jobStore)
+		}
+	}()
+
+	getIds := func(writer http.ResponseWriter, request *http.Request) {
+		writeContentType(writer)
+		ids, err := jobStore.GetIds()
+		if err != nil {
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusInternalServerError, writer)
+			return
+		}
+		response := IdsResponse{Ids: ids}
+		dataInBytes, err := json.Marshal(response)
+		if err != nil {
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusInternalServerError, writer)
+			return
+		}
+		writer.Write(dataInBytes)
+	}
+
+	getJob := func(writer http.ResponseWriter, request *http.Request) {
+		writeContentType(writer)
+		vars := mux.Vars(request)
+		id := vars["id"]
+		job, err := jobStore.GetJob(id)
+		if err != nil {
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusNotFound, writer)
+			return
+		}
+		jobBytes, err := json.Marshal(job)
+		if err != nil {
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusInternalServerError, writer)
+			return
+		}
+		writer.Write(jobBytes)
+	}
+
+	runJob := func(writer http.ResponseWriter, request *http.Request, job *Job, queued bool) {
+		writeContentType(writer)
+		job.Created = time.Now().Unix()
+		if queued {
+			job.Status = Queued
+		} else {
+			job.Status = InProgress
+		}
+		err := jobStore.SaveNewJob(job)
+		if err != nil {
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusInternalServerError, writer)
+			return
+		}
+		writer.Write([]byte(getIdResponse(job.Id)))
+		if queued {
+			go func() {
+				jobQueue <- job
+			}()
+		} else {
+			go ExecuteJob(job, jobStore)
+		}
+	}
+
+	router.Path("/v1/exec").Methods(http.MethodPost).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writeContentType(writer)
 		var executable Executable
 		err := json.NewDecoder(request.Body).Decode(&executable)
@@ -219,32 +289,34 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 		} else {
 			writer.Write(respData)
 		}
-	}).Methods(http.MethodPost)
+	})
 
-	router.HandleFunc("/v1/jobs", func(writer http.ResponseWriter, request *http.Request) {
+	router.Path("/v1/jobs").Methods(http.MethodPost).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var job Job
 		err := json.NewDecoder(request.Body).Decode(&job)
+		q := request.URL.Query()
+		queue := strings.ToLower(q.Get("queue")) == "true"
 		if err != nil {
 			glog.Error(err)
 			writeErrorResponse(err, http.StatusBadRequest, writer)
 			return
 		}
-		runJob(writer, request, &job, jobStore)
-	}).Methods(http.MethodPost)
+		runJob(writer, request, &job, queue)
+	})
 
-	router.HandleFunc("/v1/jobs", func(writer http.ResponseWriter, request *http.Request) {
-		getIds(writer, request, jobStore)
-	}).Methods(http.MethodGet)
+	router.Path("/v1/jobs").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		getIds(writer, request)
+	})
 
-	router.HandleFunc("/v1/jobs/{id}", func(writer http.ResponseWriter, request *http.Request) {
-		getJob(writer, request, jobStore)
-	}).Methods(http.MethodGet)
+	router.Path("/v1/jobs/{id}").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		getJob(writer, request)
+	})
 
-	router.HandleFunc("/v1/saved", func(writer http.ResponseWriter, request *http.Request) {
-		getIds(writer, request, savedJobStore)
-	}).Methods(http.MethodGet)
+	router.Path("/v1/saved").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		getIds(writer, request)
+	})
 
-	router.HandleFunc("/v1/saved", func(writer http.ResponseWriter, request *http.Request) {
+	router.Path("/v1/saved").Methods(http.MethodPut).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writeContentType(writer)
 		var job Job
 		err := json.NewDecoder(request.Body).Decode(&job)
@@ -259,9 +331,9 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 		savedJobStore.SaveNewJob(&job)
 		writer.WriteHeader(http.StatusCreated)
 		writer.Write([]byte(getIdResponse(job.Id)))
-	}).Methods(http.MethodPut)
+	})
 
-	router.HandleFunc("/v1/saved/{id}", func(writer http.ResponseWriter, request *http.Request) {
+	router.Path("/v1/saved/{id}").Methods(http.MethodDelete).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writeContentType(writer)
 		vars := mux.Vars(request)
 		id := vars["id"]
@@ -271,15 +343,17 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 			writeErrorResponse(err, http.StatusInternalServerError, writer)
 		}
 		writer.WriteHeader(http.StatusNoContent)
-	}).Methods(http.MethodDelete)
+	})
 
-	router.HandleFunc("/v1/saved/{id}", func(writer http.ResponseWriter, request *http.Request) {
-		getJob(writer, request, jobStore)
-	}).Methods(http.MethodGet)
+	router.Path("/v1/saved/{id}").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		getJob(writer, request)
+	})
 
-	router.HandleFunc("/v1/saved/{id}", func(writer http.ResponseWriter, request *http.Request) {
+	router.Path("/v1/saved/{id}").Methods(http.MethodPost).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		vars := mux.Vars(request)
 		id := vars["id"]
+		q := request.URL.Query()
+		queue := strings.ToLower(q.Get("queue")) == "true"
 
 		job, err := savedJobStore.GetJob(id)
 		job.Id = ""
@@ -288,90 +362,17 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 			writeErrorResponse(err, http.StatusNotFound, writer)
 			return
 		}
-		var env Env
-		err = json.NewDecoder(request.Body).Decode(&env)
+		var runBody RunBody
+		err = json.NewDecoder(request.Body).Decode(&runBody)
 		if err != nil {
 			glog.Error(err)
 		} else {
-			for _, v := range job.Executions {
-				for key, value := range env.Env {
-					v.Executable.Env[key] = value
-				}
-			}
+			updateJobEnv(job, runBody.Env)
 		}
-		runJob(writer, request, job, jobStore)
-	}).Methods(http.MethodPost)
+		runJob(writer, request, job, queue)
+	})
 
 	return router
-}
-
-func getIds(writer http.ResponseWriter, request *http.Request, jobStore JobStore) {
-	writeContentType(writer)
-	ids, err := jobStore.GetIds()
-	if err != nil {
-		glog.Error(err)
-		writeErrorResponse(err, http.StatusInternalServerError, writer)
-		return
-	}
-	response := IdsResponse{Ids: ids}
-	dataInBytes, err := json.Marshal(response)
-	if err != nil {
-		glog.Error(err)
-		writeErrorResponse(err, http.StatusInternalServerError, writer)
-		return
-	}
-	writer.Write(dataInBytes)
-}
-
-func getJob(writer http.ResponseWriter, request *http.Request, jobStore JobStore) {
-	writeContentType(writer)
-	vars := mux.Vars(request)
-	id := vars["id"]
-	job, err := jobStore.GetJob(id)
-	if err != nil {
-		glog.Error(err)
-		writeErrorResponse(err, http.StatusNotFound, writer)
-		return
-	}
-	jobBytes, err := json.Marshal(job)
-	if err != nil {
-		glog.Error(err)
-		writeErrorResponse(err, http.StatusInternalServerError, writer)
-		return
-	}
-	writer.Write(jobBytes)
-}
-
-func runJob(writer http.ResponseWriter, request *http.Request, job *Job, jobStore JobStore) {
-	writeContentType(writer)
-	job.Created = time.Now().Unix()
-	job.Status = InProgress
-	err := jobStore.SaveNewJob(job)
-	if err != nil {
-		glog.Error(err)
-		writeErrorResponse(err, http.StatusInternalServerError, writer)
-		return
-	}
-	writer.Write([]byte(getIdResponse(job.Id)))
-	go func() {
-		if job.Executions != nil {
-			for _, execution := range job.Executions {
-				if execution.Executable != nil {
-					Execute(execution)
-					job.LastModified = time.Now().Unix()
-					if execution.ExitCode != 0 && !job.IgnoreErrors {
-						job.Status = Failed
-						jobStore.UpdateJob(job)
-						return
-					}
-					jobStore.UpdateJob(job)
-				}
-			}
-		}
-		job.LastModified = time.Now().Unix()
-		job.Status = Done
-		jobStore.UpdateJob(job)
-	}()
 }
 
 func writeErrorResponse(err error, status int, writer http.ResponseWriter) {
@@ -394,4 +395,32 @@ func updateEnv(existingEnv []string, newVars map[string]string) []string {
 		strArray[i] = strings.Join([]string{k, v}, "=")
 	}
 	return append(existingEnv, strArray...)
+}
+
+func ExecuteJob(job *Job, jobStore JobStore) {
+	if job.Executions != nil {
+		for _, execution := range job.Executions {
+			if execution.Executable != nil {
+				Execute(execution)
+				job.LastModified = time.Now().Unix()
+				if execution.ExitCode != 0 && !job.IgnoreErrors {
+					job.Status = Failed
+					jobStore.UpdateJob(job)
+					return
+				}
+				jobStore.UpdateJob(job)
+			}
+		}
+	}
+	job.LastModified = time.Now().Unix()
+	job.Status = Done
+	jobStore.UpdateJob(job)
+}
+
+func updateJobEnv(job *Job, newEnvs map[string]string) {
+	for _, v := range job.Executions {
+		for key, value := range newEnvs {
+			v.Executable.Env[key] = value
+		}
+	}
 }
