@@ -210,9 +210,10 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 		}
 	}()
 
-	getIds := func(writer http.ResponseWriter, request *http.Request) {
+
+	getIds := func(writer http.ResponseWriter, request *http.Request, store JobStore) {
 		writeContentType(writer)
-		ids, err := jobStore.GetIds()
+		ids, err := store.GetIds()
 		if err != nil {
 			glog.Error(err)
 			writeErrorResponse(err, http.StatusInternalServerError, writer)
@@ -228,11 +229,11 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 		writer.Write(dataInBytes)
 	}
 
-	getJob := func(writer http.ResponseWriter, request *http.Request) {
+	getJob := func(writer http.ResponseWriter, request *http.Request, store JobStore) {
 		writeContentType(writer)
 		vars := mux.Vars(request)
 		id := vars["id"]
-		job, err := jobStore.GetJob(id)
+		job, err := store.GetJob(id)
 		if err != nil {
 			glog.Error(err)
 			writeErrorResponse(err, http.StatusNotFound, writer)
@@ -305,15 +306,15 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 	})
 
 	router.Path("/v1/jobs").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		getIds(writer, request)
+		getIds(writer, request, jobStore)
 	})
 
 	router.Path("/v1/jobs/{id}").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		getJob(writer, request)
+		getJob(writer, request, jobStore)
 	})
 
 	router.Path("/v1/saved").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		getIds(writer, request)
+		getIds(writer, request, savedJobStore)
 	})
 
 	router.Path("/v1/saved").Methods(http.MethodPut).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -346,7 +347,7 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore) (*mux.Router) {
 	})
 
 	router.Path("/v1/saved/{id}").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		getJob(writer, request)
+		getJob(writer, request, savedJobStore)
 	})
 
 	router.Path("/v1/saved/{id}").Methods(http.MethodPost).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
