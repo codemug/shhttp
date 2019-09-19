@@ -167,8 +167,8 @@ func (j FileBasedJobStore) ClearFinished() {
 	files, err := ioutil.ReadDir(j.BasePath)
 	if err != nil {
 		glog.Error(err)
+		return
 	}
-	return
 	for _, v := range files {
 		if !v.IsDir() {
 			job, err := j.loadJob(j.getFullPath(v.Name()))
