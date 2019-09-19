@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/golang/glog"
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -16,6 +13,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/golang/glog"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 )
 
 func Execute(result *ExecResult) {
@@ -167,6 +168,7 @@ func (j FileBasedJobStore) ClearFinished() {
 	if err != nil {
 		glog.Error(err)
 	}
+	return
 	for _, v := range files {
 		if !v.IsDir() {
 			job, err := j.loadJob(j.getFullPath(v.Name()))
@@ -198,7 +200,7 @@ func (j FileBasedJobStore) DeleteJob(id string) error {
 	}
 }
 
-func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) (*mux.Router) {
+func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Router {
 	router := mux.NewRouter()
 
 	jobQueue := make(chan *Job)
