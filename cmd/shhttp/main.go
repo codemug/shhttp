@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"github.com/codemug/shhttp/pkg"
 	"github.com/golang/glog"
 	"net/http"
 	"path"
@@ -19,11 +20,11 @@ func main() {
 
 	flag.Parse()
 
-	jobStore := FileBasedJobStore{BasePath: path.Join(*location, "jobs")}
-	jobStore.ensureDirectory()
+	jobStore := pkg.FileBasedJobStore{BasePath: path.Join(*location, "jobs")}
+	jobStore.EnsureDirectory()
 
-	savedJobStore := FileBasedJobStore{BasePath: path.Join(*location, "saved")}
-	savedJobStore.ensureDirectory()
+	savedJobStore := pkg.FileBasedJobStore{BasePath: path.Join(*location, "saved")}
+	savedJobStore.EnsureDirectory()
 
 	if *cleanup > 0 {
 		interval := time.Duration(*cleanup) * time.Hour
@@ -39,7 +40,7 @@ func main() {
 		}()
 	}
 
-	router := GetRouter(jobStore, savedJobStore, *revive)
+	router := pkg.GetRouter(jobStore, savedJobStore, *revive)
 	address := strings.Join([]string{*hostname, strconv.Itoa(*port)}, ":")
 	glog.Infof("starting HTTP listener at %s", address)
 	glog.Fatal(http.ListenAndServe(address, router))

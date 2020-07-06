@@ -1,18 +1,17 @@
-FROM golang:1.11-alpine
+FROM golang:1.14-alpine
 
-RUN apk add --no-cache --update git && \
-    go get github.com/golang/dep/cmd/dep && \
-    mkdir -p /go/src/shhttp
+RUN mkdir -p /go/src/github.com/codemug/shhttp && \
+    apk update && apk add alpine-sdk
 
-WORKDIR /go/src/shhttp
+ADD . /go/src/github.com/codemug/shhttp
 
-ADD *.go Gopkg.* ./
+RUN cd /go/src/github.com/codemug/shhttp && \
+    go mod tidy && \
+    go test github.com/codemug/shhttp/pkg -v && \
+    go build -o /go/bin/shhttp github.com/codemug/shhttp/cmd/shhttp
 
-RUN dep ensure && \
-    go install
+FROM alpine:3.11
 
-FROM alpine:3.9
+COPY --from=0 /go/bin/shhttp /usr/local/bin/shhttp
 
-COPY --from=0 /go/bin/shhttp /usr/bin/
-
-ENTRYPOINT [ "/usr/bin/shhttp" ]
+ENTRYPOINT ["/usr/local/bin/shhttp"]

@@ -1,4 +1,4 @@
-package main
+package pkg
 
 import (
 	"bytes"
@@ -66,7 +66,7 @@ func getCommand(result *ExecResult) *exec.Cmd {
 	return exec.Command(result.Executable.Command, result.Executable.Args...)
 }
 
-func (j FileBasedJobStore) ensureDirectory() {
+func (j FileBasedJobStore) EnsureDirectory() {
 	if _, err := os.Stat(j.BasePath); os.IsNotExist(err) {
 		glog.V(2).Infof("creating directory: %s", j.BasePath)
 		err := os.MkdirAll(j.BasePath, os.ModePerm)
@@ -117,13 +117,13 @@ func (j FileBasedJobStore) loadJob(path string) (*Job, error) {
 }
 
 func (j FileBasedJobStore) SaveNewJob(job *Job) error {
-	j.ensureDirectory()
+	j.EnsureDirectory()
 	job.Id = j.getNewId(job)
 	return j.saveJob(job)
 }
 
 func (j FileBasedJobStore) UpdateJob(job *Job) error {
-	j.ensureDirectory()
+	j.EnsureDirectory()
 	if _, err := os.Stat(j.getFullPath(job.Id)); err == nil {
 
 		return j.saveJob(job)
@@ -136,7 +136,7 @@ func (j FileBasedJobStore) UpdateJob(job *Job) error {
 }
 
 func (j FileBasedJobStore) GetJob(id string) (*Job, error) {
-	j.ensureDirectory()
+	j.EnsureDirectory()
 	fullPath := j.getFullPath(id)
 	if _, err := os.Stat(fullPath); err == nil {
 		return j.loadJob(fullPath)
@@ -149,7 +149,7 @@ func (j FileBasedJobStore) GetJob(id string) (*Job, error) {
 }
 
 func (j FileBasedJobStore) GetIds() ([]string, error) {
-	j.ensureDirectory()
+	j.EnsureDirectory()
 	files, err := ioutil.ReadDir(j.BasePath)
 	if err != nil {
 		glog.Error(err)
@@ -163,7 +163,7 @@ func (j FileBasedJobStore) GetIds() ([]string, error) {
 }
 
 func (j FileBasedJobStore) ClearFinished() {
-	j.ensureDirectory()
+	j.EnsureDirectory()
 	files, err := ioutil.ReadDir(j.BasePath)
 	if err != nil {
 		glog.Error(err)
@@ -189,7 +189,7 @@ func (j FileBasedJobStore) ClearFinished() {
 }
 
 func (j FileBasedJobStore) DeleteJob(id string) error {
-	j.ensureDirectory()
+	j.EnsureDirectory()
 	if _, err := os.Stat(j.getFullPath(id)); err == nil {
 		return os.Remove(j.getFullPath(id))
 	} else if os.IsNotExist(err) {
