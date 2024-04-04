@@ -49,6 +49,8 @@ Usage of shhttp:
     	If non-empty, write log files in this directory
   -logtostderr
     	log to standard error instead of files
+  -password string
+    	HTTP API password
   -port int
     	port to listen on (default 2112)
   -stderrthreshold value

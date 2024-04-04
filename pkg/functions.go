@@ -200,7 +200,7 @@ func (j FileBasedJobStore) DeleteJob(id string) error {
 	}
 }
 
-func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Router {
+func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool, password string) *mux.Router {
 	router := mux.NewRouter()
 
 	jobQueue := make(chan *Job)
@@ -312,6 +312,14 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Rout
 			writeErrorResponse(err, http.StatusBadRequest, writer)
 			return
 		}
+		if executable.Password != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
+		// Omit the "Password" field when marshaling if any.
+		executable.Password = ""
 		result := ExecResult{Executable: &executable}
 		Execute(&result)
 		respData, err := json.Marshal(result)
@@ -333,18 +341,47 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Rout
 			writeErrorResponse(err, http.StatusBadRequest, writer)
 			return
 		}
+		if job.Password != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
+		// Omit the "Password" field when marshaling if any.
+		job.Password = ""
 		runJob(writer, request, &job, queue)
 	})
 
 	router.Path("/v1/jobs").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		q := request.URL.Query()
+		if q.Get("password") != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
 		getIds(writer, request, jobStore)
 	})
 
 	router.Path("/v1/jobs/{id}").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		q := request.URL.Query()
+		if q.Get("password") != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
 		getJob(writer, request, jobStore)
 	})
 
 	router.Path("/v1/saved").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		q := request.URL.Query()
+		if q.Get("password") != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
 		getIds(writer, request, savedJobStore)
 	})
 
@@ -357,6 +394,14 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Rout
 			writeErrorResponse(err, http.StatusBadRequest, writer)
 			return
 		}
+		if job.Password != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
+		// Omit the "Password" field when marshaling if any.
+		job.Password = ""
 		if job.Id == "" {
 			job.Id = uuid.New().String()
 		}
@@ -367,6 +412,13 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Rout
 
 	router.Path("/v1/saved/{id}").Methods(http.MethodDelete).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writeContentType(writer)
+		q := request.URL.Query()
+		if q.Get("password") != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
 		vars := mux.Vars(request)
 		id := vars["id"]
 		err := savedJobStore.DeleteJob(id)
@@ -378,6 +430,13 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Rout
 	})
 
 	router.Path("/v1/saved/{id}").Methods(http.MethodGet).HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		q := request.URL.Query()
+		if q.Get("password") != password {
+			err := errors.New("password invalid");
+			glog.Error(err)
+			writeErrorResponse(err, http.StatusUnauthorized, writer)
+			return
+		}
 		getJob(writer, request, savedJobStore)
 	})
 
@@ -399,6 +458,14 @@ func GetRouter(jobStore JobStore, savedJobStore JobStore, revive bool) *mux.Rout
 		if err != nil {
 			glog.Error(err)
 		} else {
+			if runBody.Password != password {
+				err := errors.New("password invalid");
+				glog.Error(err)
+				writeErrorResponse(err, http.StatusUnauthorized, writer)
+				return
+			}
+			// Omit the "Password" field when marshaling if any.
+			runBody.Password = ""
 			updateJobEnv(job, runBody.Env)
 		}
 		runJob(writer, request, job, queue)

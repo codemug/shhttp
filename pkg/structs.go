@@ -1,12 +1,13 @@
 package pkg
 
 type Executable struct {
-	Command string
-	Args    []string
-	BaseDir string
-	Stdin   string
-	Shell   bool
-	Env     map[string]string
+	Command     string
+	Args        []string
+	BaseDir     string
+	Stdin       string
+	Shell       bool
+	Env         map[string]string
+	Password    string `json:"Password,omitempty"`
 }
 
 type ExecResult struct {
@@ -34,10 +35,12 @@ type Job struct {
 	Created      int64
 	LastModified int64
 	IgnoreErrors bool
+	Password     string `json:"Password,omitempty"`
 }
 
 type RunBody struct {
-	Env map[string]string
+	Env          map[string]string
+	Password     string `json:"Password,omitempty"`
 }
 
 type IdsResponse struct {
