@@ -66,6 +66,10 @@ func (ts *testServer) do(t *testing.T, token, method, path string, body any, out
 		rd = bytes.NewReader(j)
 	}
 	req, _ := http.NewRequest(method, ts.URL+path, rd)
+	if body != nil {
+		// The stdin endpoint ignores it; JSON endpoints require it.
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -140,6 +144,21 @@ func TestAuthentication(t *testing.T) {
 	expect(t, ts.do(t, "", "GET", "/v2/version", nil, nil), 200)
 }
 
+func TestJSONContentTypeIsRequired(t *testing.T) {
+	ts := newServer(t)
+	req, _ := http.NewRequest("POST", ts.URL+"/v2/keys", strings.NewReader(`{"name":"x","scopes":["sessions:run"]}`))
+	req.Header.Set("Authorization", "Bearer "+ts.master)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("status %d, want 415", resp.StatusCode)
+	}
+}
+
 func TestRoutingErrorsUseProblemJSON(t *testing.T) {
 	ts := newServer(t)
 	expect(t, ts.do(t, "", "GET", "/nope", nil, nil), 404)
@@ -150,8 +169,14 @@ func TestKeyLifecycle(t *testing.T) {
 	ts := newServer(t)
 	var k api.KeyWithSecret
 	expect(t, ts.do(t, ts.master, "POST", "/v2/keys", api.CreateKeyRequest{Name: "ci", Scopes: []string{api.ScopeSessionsRun}}, &k), 201)
-	expect(t, ts.do(t, ts.master, "POST", "/v2/keys", `{"name":"x","scopes":["sessions:run"],"bogus":1}`, nil), 400)
-	expect(t, ts.do(t, ts.master, "POST", "/v2/keys", api.CreateKeyRequest{Name: "x", Scopes: []string{"root"}}, nil), 400)
+	// Schema violations are 422 with the failing field; rule violations are 400.
+	var prob api.Problem
+	expect(t, ts.do(t, ts.master, "POST", "/v2/keys", `{"name":"x","scopes":["sessions:run"],"bogus":1}`, &prob), 422)
+	if len(prob.Errors) != 1 || prob.Errors[0].Location != "body.bogus" {
+		t.Fatalf("problem = %+v", prob)
+	}
+	expect(t, ts.do(t, ts.master, "POST", "/v2/keys", api.CreateKeyRequest{Name: "x", Scopes: []string{"root"}}, nil), 422)
+	expect(t, ts.do(t, ts.master, "POST", "/v2/keys", api.CreateKeyRequest{Name: "x", Scopes: []string{"sessions:run"}, Policy: api.Policy{Commands: []string{"("}}}, nil), 400)
 
 	var list api.KeyList
 	expect(t, ts.do(t, ts.master, "GET", "/v2/keys", nil, &list), 200)
@@ -258,13 +283,19 @@ func TestRunAndWait(t *testing.T) {
 func TestBadRequests(t *testing.T) {
 	ts := newServer(t)
 	key := ts.newKey(t, api.CreateKeyRequest{})
+	// Missing or malformed JSON, and rules the schema cannot express: 400.
 	expect(t, ts.do(t, key, "POST", "/v2/sessions", nil, nil), 400)
-	expect(t, ts.do(t, key, "POST", "/v2/sessions", `{"argv":["true"],"unknown":1}`, nil), 400)
 	expect(t, ts.do(t, key, "POST", "/v2/sessions", `{"argv":["true"]}{}`, nil), 400)
 	expect(t, ts.do(t, key, "POST", "/v2/sessions", api.SessionSpec{}, nil), 400)
-	expect(t, ts.do(t, key, "POST", "/v2/sessions", `{"argv":["true"],"timeout":"soon"}`, nil), 400)
-	expect(t, ts.do(t, key, "POST", "/v2/sessions?wait=maybe", api.SessionSpec{Argv: []string{"true"}}, nil), 400)
-	expect(t, ts.do(t, key, "GET", "/v2/sessions?state=nope", nil, nil), 400)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions?wait=true&wait_timeout=soon", api.SessionSpec{Argv: []string{"true"}}, nil), 400)
+	// Schema violations: 422.
+	expect(t, ts.do(t, key, "POST", "/v2/sessions", `{"argv":["true"],"unknown":1}`, nil), 422)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions", `{"argv":["true"],"timeout":"soon"}`, nil), 422)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions", `{"argv":[]}`, nil), 422)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions?wait=maybe", api.SessionSpec{Argv: []string{"true"}}, nil), 422)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions?wait=true&keep=middle", api.SessionSpec{Argv: []string{"true"}}, nil), 422)
+	expect(t, ts.do(t, key, "GET", "/v2/sessions?state=nope", nil, nil), 422)
+	expect(t, ts.do(t, key, "GET", "/v2/sessions?limit=0", nil, nil), 422)
 	expect(t, ts.do(t, key, "GET", "/v2/sessions/ses_bogus", nil, nil), 404)
 }
 
@@ -446,5 +477,82 @@ func TestListPagination(t *testing.T) {
 	expect(t, ts.do(t, key, "GET", "/v2/sessions?label=n=1", nil, &page), 200)
 	if len(page.Sessions) != 2 {
 		t.Fatalf("label filter returned %d", len(page.Sessions))
+	}
+}
+
+// Stdin must reach the process while the request body is still being sent.
+func TestStdinIsStreamed(t *testing.T) {
+	ts := newServer(t)
+	key := ts.newKey(t, api.CreateKeyRequest{})
+	var s api.Session
+	expect(t, ts.do(t, key, "POST", "/v2/sessions", api.SessionSpec{Argv: []string{"cat"}}, &s), 201)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/v2/sessions/"+s.ID+"/events?follow=true&format=raw", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	events, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Body.Close()
+	out := bufio.NewReader(events.Body)
+
+	pr, pw := io.Pipe()
+	stdinDone := make(chan int)
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, "POST", ts.URL+"/v2/sessions/"+s.ID+"/stdin?close=true", pr)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			stdinDone <- 0
+			return
+		}
+		resp.Body.Close()
+		stdinDone <- resp.StatusCode
+	}()
+	for _, line := range []string{"first\n", "second\n"} {
+		pw.Write([]byte(line))
+		got, err := out.ReadString('\n')
+		if err != nil || got != line {
+			t.Fatalf("echoed %q, %v; want %q while the request is still open", got, err, line)
+		}
+	}
+	pw.Close()
+	if code := <-stdinDone; code != 200 {
+		t.Fatalf("stdin request status %d", code)
+	}
+}
+
+func TestOpenAPIDocument(t *testing.T) {
+	ts := newServer(t)
+	resp, err := ts.Client().Get(ts.URL + "/v2/openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var doc struct {
+		OpenAPI string                    `json:"openapi"`
+		Paths   map[string]map[string]any `json:"paths"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.OpenAPI != "3.1.0" {
+		t.Fatalf("openapi = %q", doc.OpenAPI)
+	}
+	for path, method := range map[string]string{
+		"/v2/sessions":             "post",
+		"/v2/sessions/{id}/events": "get",
+		"/v2/sessions/{id}/stdin":  "post",
+		"/v2/keys/{id}/rotate":     "post",
+		"/v2/whoami":               "get",
+	} {
+		if doc.Paths[path][method] == nil {
+			t.Errorf("%s %s missing from the OpenAPI document", method, path)
+		}
+	}
+	if r, _ := ts.Client().Get(ts.URL + "/v2/docs"); r == nil || r.StatusCode != 200 {
+		t.Error("/v2/docs not served")
 	}
 }

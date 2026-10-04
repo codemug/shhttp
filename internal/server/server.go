@@ -1,15 +1,14 @@
-// Package server implements the HTTP API.
+// Package server implements the HTTP API on top of huma, which validates
+// requests against the operations' schemas and serves the OpenAPI document.
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -19,6 +18,8 @@ import (
 	"github.com/codemug/shhttp/internal/session"
 	"github.com/codemug/shhttp/internal/store"
 	"github.com/codemug/shhttp/pkg/api"
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 )
 
 // Body size limits for JSON requests. Session creation allows more because
@@ -28,50 +29,62 @@ const (
 	maxSessionBody = 16 << 20
 )
 
+// APIVersion is the version of the API contract, as published in the OpenAPI
+// document. The server's own version is served at /v2/version.
+const APIVersion = "2.0"
+
+// Paths of the generated API description.
+const (
+	OpenAPIPath = "/v2/openapi" // serves .json and .yaml
+	DocsPath    = "/v2/docs"
+)
+
 // Server serves the v2 API.
 type Server struct {
 	auth     *auth.Authenticator
 	sessions *session.Manager
 	log      *slog.Logger
-	version  string
 	mux      *http.ServeMux
+	api      huma.API
 }
 
 // New returns a Server.
 func New(a *auth.Authenticator, m *session.Manager, logger *slog.Logger, version string) *Server {
-	s := &Server{auth: a, sessions: m, log: logger, version: version, mux: http.NewServeMux()}
-	s.routes()
+	s := &Server{auth: a, sessions: m, log: logger, mux: http.NewServeMux()}
+
+	config := huma.DefaultConfig("shhttp", APIVersion)
+	config.Info.Description = "Run commands remotely, stream their output and send them input. " +
+		"See https://github.com/codemug/shhttp/blob/v2/docs/v2-design.md."
+	config.OpenAPIPath = OpenAPIPath
+	config.DocsPath = DocsPath
+	config.SchemasPath = "/v2/schemas"
+	// The default hooks add a "$schema" field to every response body.
+	config.CreateHooks = nil
+	config.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"bearer": {
+			Type:        "http",
+			Scheme:      "bearer",
+			Description: "The master key (`shhm_…`) for /v2/keys, an API key (`shh_…`) for everything else.",
+		},
+	}
+	// Durations are written as Go duration strings such as "1m30s".
+	config.Components.Schemas.RegisterTypeAlias(reflect.TypeFor[api.Duration](), reflect.TypeFor[string]())
+
+	s.api = humago.New(s.mux, config)
+	s.api.UseMiddleware(s.authenticate)
+	s.registerMeta(version)
+	s.registerKeys()
+	s.registerSessions()
 	return s
 }
 
-func (s *Server) routes() {
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		io.WriteString(w, "ok\n")
-	})
-	s.mux.HandleFunc("GET /v2/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, api.Version{Version: s.version})
-	})
-	s.mux.HandleFunc("GET /v2/whoami", s.authed(s.whoami))
-
-	s.mux.HandleFunc("POST /v2/keys", s.master(s.createKey))
-	s.mux.HandleFunc("GET /v2/keys", s.master(s.listKeys))
-	s.mux.HandleFunc("GET /v2/keys/{id}", s.master(s.getKey))
-	s.mux.HandleFunc("PATCH /v2/keys/{id}", s.master(s.updateKey))
-	s.mux.HandleFunc("DELETE /v2/keys/{id}", s.master(s.revokeKey))
-	s.mux.HandleFunc("POST /v2/keys/{id}/rotate", s.master(s.rotateKey))
-
-	s.mux.HandleFunc("POST /v2/sessions", s.scoped(api.ScopeSessionsRun, s.createSession))
-	s.mux.HandleFunc("GET /v2/sessions", s.scoped(api.ScopeSessionsRead, s.listSessions))
-	s.mux.HandleFunc("GET /v2/sessions/{id}", s.scoped(api.ScopeSessionsRead, s.getSession))
-	s.mux.HandleFunc("DELETE /v2/sessions/{id}", s.scoped(api.ScopeSessionsRun, s.deleteSession))
-	s.mux.HandleFunc("GET /v2/sessions/{id}/events", s.scoped(api.ScopeSessionsRead, s.sessionEvents))
-	s.mux.HandleFunc("POST /v2/sessions/{id}/stdin", s.scoped(api.ScopeSessionsRun, s.sessionStdin))
-	s.mux.HandleFunc("POST /v2/sessions/{id}/signal", s.scoped(api.ScopeSessionsRun, s.sessionSignal))
-	s.mux.HandleFunc("POST /v2/sessions/{id}/kill", s.scoped(api.ScopeSessionsRun, s.sessionKill))
+// OpenAPIYAML returns the OpenAPI document without starting a server.
+func OpenAPIYAML() ([]byte, error) {
+	return New(nil, nil, slog.New(slog.DiscardHandler), "").api.OpenAPI().YAML()
 }
 
-// Handler returns the HTTP handler with logging and panic recovery.
+// Handler returns the HTTP handler with logging, panic recovery and
+// problem+json responses for unknown routes.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -142,150 +155,143 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-type handler func(w http.ResponseWriter, r *http.Request, p auth.Principal)
-
-// authed requires any valid credential.
-func (s *Server) authed(h handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || token == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="shhttp"`)
-			writeProblem(w, http.StatusUnauthorized, "an Authorization: Bearer <key> header is required")
-			return
-		}
-		p, err := s.auth.Authenticate(r.Context(), strings.TrimSpace(token))
-		if errors.Is(err, auth.ErrUnauthorized) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="shhttp", error="invalid_token"`)
-			writeProblem(w, http.StatusUnauthorized, "the key is invalid, expired or revoked")
-			return
-		}
-		if err != nil {
-			s.internalError(w, err)
-			return
-		}
-		h(w, r, p)
-	}
-}
-
-// master requires the master key.
-func (s *Server) master(h handler) http.HandlerFunc {
-	return s.authed(func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		if !p.Master {
-			writeProblem(w, http.StatusForbidden, "only the master key can manage API keys")
-			return
-		}
-		h(w, r, p)
-	})
-}
-
-// scoped requires an API key holding scope.
-func (s *Server) scoped(scope string, h handler) http.HandlerFunc {
-	return s.authed(func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		if p.Master {
-			writeProblem(w, http.StatusForbidden, "the master key can only manage API keys; create an API key to use this endpoint")
-			return
-		}
-		if !p.Has(scope) {
-			writeProblem(w, http.StatusForbidden, fmt.Sprintf("this key lacks the %s scope", scope))
-			return
-		}
-		h(w, r, p)
-	})
-}
-
-func (s *Server) whoami(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-	if p.Master {
-		writeJSON(w, http.StatusOK, api.Whoami{Master: true})
-		return
-	}
-	writeJSON(w, http.StatusOK, api.Whoami{Key: &p.Key.Key, Notes: policy.Notes(p.Key.Policy)})
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	b, err := api.Marshal(v)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "encoding response: "+err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	w.Write(append(b, '\n'))
-}
-
 func writeProblem(w http.ResponseWriter, status int, detail string) {
 	b, _ := json.Marshal(api.Problem{Title: http.StatusText(status), Status: status, Detail: detail})
 	w.Header().Set("Content-Type", "application/problem+json")
-	w.Header().Del("Content-Length")
 	w.WriteHeader(status)
 	w.Write(append(b, '\n'))
 }
 
-func (s *Server) internalError(w http.ResponseWriter, err error) {
-	s.log.Error("internal error", "err", err)
-	writeProblem(w, http.StatusInternalServerError, "internal error")
+// access is the credential an operation requires. It is stored in the
+// operation's metadata and checked by authenticate.
+type access struct {
+	public bool   // no credential
+	master bool   // the master key
+	scope  string // an API key holding this scope; "" means any credential
 }
 
-// writeError maps a domain error to a problem response.
-func (s *Server) writeError(w http.ResponseWriter, err error) {
+const accessKey = "access"
+
+type principalKey struct{}
+
+func principalFrom(ctx context.Context) auth.Principal {
+	p, _ := ctx.Value(principalKey{}).(auth.Principal)
+	return p
+}
+
+// operation fills in the parts every operation shares.
+func operation(id, method, path, summary, tag string, a access) huma.Operation {
+	op := huma.Operation{
+		OperationID: id,
+		Method:      method,
+		Path:        path,
+		Summary:     summary,
+		Tags:        []string{tag},
+		Metadata:    map[string]any{accessKey: a},
+	}
+	if !a.public {
+		op.Security = []map[string][]string{{"bearer": {}}}
+		op.Errors = []int{http.StatusUnauthorized, http.StatusForbidden}
+	}
+	return op
+}
+
+// authenticate is huma middleware enforcing each operation's access. It runs
+// before the request body is read.
+func (s *Server) authenticate(ctx huma.Context, next func(huma.Context)) {
+	a, _ := ctx.Operation().Metadata[accessKey].(access)
+	if a.public || ctx.Operation().Metadata[accessKey] == nil {
+		next(ctx)
+		return
+	}
+	token, ok := strings.CutPrefix(ctx.Header("Authorization"), "Bearer ")
+	if !ok || strings.TrimSpace(token) == "" {
+		ctx.SetHeader("WWW-Authenticate", `Bearer realm="shhttp"`)
+		huma.WriteErr(s.api, ctx, http.StatusUnauthorized, "an Authorization: Bearer <key> header is required")
+		return
+	}
+	p, err := s.auth.Authenticate(ctx.Context(), strings.TrimSpace(token))
+	if errors.Is(err, auth.ErrUnauthorized) {
+		ctx.SetHeader("WWW-Authenticate", `Bearer realm="shhttp", error="invalid_token"`)
+		huma.WriteErr(s.api, ctx, http.StatusUnauthorized, "the key is invalid, expired or revoked")
+		return
+	}
+	if err != nil {
+		s.log.Error("authenticating", "err", err)
+		huma.WriteErr(s.api, ctx, http.StatusInternalServerError, "internal error")
+		return
+	}
+	switch {
+	case a.master && !p.Master:
+		huma.WriteErr(s.api, ctx, http.StatusForbidden, "only the master key can manage API keys")
+		return
+	case a.scope != "" && p.Master:
+		huma.WriteErr(s.api, ctx, http.StatusForbidden, "the master key can only manage API keys; create an API key to use this endpoint")
+		return
+	case a.scope != "" && !p.Has(a.scope):
+		huma.WriteErr(s.api, ctx, http.StatusForbidden, "this key lacks the "+a.scope+" scope")
+		return
+	}
+	next(huma.WithValue(ctx, principalKey{}, p))
+}
+
+type healthOutput struct {
+	ContentType string `header:"Content-Type"`
+	Body        []byte
+}
+
+type versionOutput struct{ Body api.Version }
+
+type whoamiOutput struct{ Body api.Whoami }
+
+func (s *Server) registerMeta(version string) {
+	huma.Register(s.api, operation("health", http.MethodGet, "/healthz", "Health check", "Server", access{public: true}),
+		func(ctx context.Context, _ *struct{}) (*healthOutput, error) {
+			return &healthOutput{ContentType: "text/plain", Body: []byte("ok\n")}, nil
+		})
+	huma.Register(s.api, operation("get-version", http.MethodGet, "/v2/version", "Server version", "Server", access{public: true}),
+		func(ctx context.Context, _ *struct{}) (*versionOutput, error) {
+			return &versionOutput{Body: api.Version{Version: version}}, nil
+		})
+	op := operation("whoami", http.MethodGet, "/v2/whoami", "Describe the calling key", "Keys", access{})
+	op.Description = "Works with the master key and with API keys. For API keys, notes point out consequences of the policy that are easy to miss."
+	huma.Register(s.api, op, func(ctx context.Context, _ *struct{}) (*whoamiOutput, error) {
+		p := principalFrom(ctx)
+		if p.Master {
+			return &whoamiOutput{Body: api.Whoami{Master: true}}, nil
+		}
+		return &whoamiOutput{Body: api.Whoami{Key: &p.Key.Key, Notes: policy.Notes(p.Key.Policy)}}, nil
+	})
+}
+
+// apiError maps a domain error to a huma error with the right status.
+func (s *Server) apiError(err error) error {
 	var (
 		sessInvalid *session.InvalidError
 		keyInvalid  *auth.InvalidError
 		denied      *policy.DeniedError
 		limit       *session.LimitError
-		bad         *badRequestError
+		statusErr   huma.StatusError
 	)
 	switch {
+	case errors.As(err, &statusErr):
+		return err
 	case errors.Is(err, session.ErrNotFound), errors.Is(err, store.ErrNotFound):
-		writeProblem(w, http.StatusNotFound, "not found")
+		return huma.Error404NotFound("not found")
 	case errors.Is(err, session.ErrNotRunning), errors.Is(err, session.ErrStdinClosed), errors.Is(err, auth.ErrRevoked):
-		writeProblem(w, http.StatusConflict, err.Error())
-	case errors.As(err, &sessInvalid), errors.As(err, &keyInvalid), errors.As(err, &bad):
-		writeProblem(w, http.StatusBadRequest, err.Error())
+		return huma.Error409Conflict(err.Error())
+	case errors.As(err, &sessInvalid), errors.As(err, &keyInvalid):
+		return huma.Error400BadRequest(err.Error())
 	case errors.As(err, &denied):
-		writeProblem(w, http.StatusForbidden, err.Error())
+		return huma.Error403Forbidden(err.Error())
 	case errors.As(err, &limit):
-		writeProblem(w, http.StatusTooManyRequests, err.Error())
+		return huma.Error429TooManyRequests(err.Error())
 	case errors.Is(err, session.ErrShuttingDown):
-		writeProblem(w, http.StatusServiceUnavailable, err.Error())
+		return huma.Error503ServiceUnavailable(err.Error())
 	case errors.Is(err, context.Canceled):
 		// The client went away; nobody reads the response.
-	default:
-		s.internalError(w, err)
+		return huma.Error400BadRequest("request cancelled")
 	}
-}
-
-type badRequestError struct{ msg string }
-
-func (e *badRequestError) Error() string { return e.msg }
-
-func badRequest(format string, args ...any) error {
-	return &badRequestError{fmt.Sprintf(format, args...)}
-}
-
-// decodeJSON decodes a single JSON object, rejecting unknown fields. An
-// empty body leaves v unchanged when optional is true.
-func decodeJSON(w http.ResponseWriter, r *http.Request, v any, limit int64, optional bool) error {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			return badRequest("request body exceeds %d bytes", limit)
-		}
-		return err
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		if optional {
-			return nil
-		}
-		return badRequest("a JSON request body is required")
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return badRequest("invalid JSON body: %v", err)
-	}
-	if dec.More() {
-		return badRequest("invalid JSON body: unexpected data after the object")
-	}
-	return nil
+	s.log.Error("internal error", "err", err)
+	return huma.Error500InternalServerError("internal error")
 }

@@ -53,33 +53,33 @@ func (d Duration) Std() time.Duration { return time.Duration(d) }
 type SessionSpec struct {
 	// Argv is the program and its arguments. Exactly one of Argv and Shell
 	// must be set.
-	Argv []string `json:"argv,omitempty"`
+	Argv []string `json:"argv,omitempty" minItems:"1" doc:"Program and arguments. Set exactly one of argv and shell." example:"[\"ls\", \"-l\"]"`
 	// Shell is a command line run with "sh -c" ("cmd /C" on Windows).
-	Shell string `json:"shell,omitempty"`
+	Shell string `json:"shell,omitempty" doc:"Command line run with sh -c (cmd /C on Windows)." example:"ls -l | wc -l"`
 	// Env holds extra environment variables.
-	Env map[string]string `json:"env,omitempty"`
+	Env map[string]string `json:"env,omitempty" doc:"Extra environment variables."`
 	// InheritEnv starts the process from the server's environment. Defaults
 	// to true.
-	InheritEnv *bool `json:"inherit_env,omitempty"`
+	InheritEnv *bool `json:"inherit_env,omitempty" doc:"Start from the server's environment. Defaults to true."`
 	// Cwd is the working directory.
-	Cwd string `json:"cwd,omitempty"`
+	Cwd string `json:"cwd,omitempty" doc:"Absolute working directory." example:"/srv/app"`
 	// Stdin is written to the process's stdin when it starts. StdinB64 is
 	// the same for binary input. At most one may be set.
-	Stdin    string `json:"stdin,omitempty"`
-	StdinB64 []byte `json:"stdin_b64,omitempty"`
+	Stdin    string `json:"stdin,omitempty" doc:"Written to stdin when the process starts."`
+	StdinB64 []byte `json:"stdin_b64,omitempty" doc:"Binary initial stdin. At most one of stdin and stdin_b64."`
 	// StdinClose closes stdin after the initial input is written.
-	StdinClose bool `json:"stdin_close,omitempty"`
+	StdinClose bool `json:"stdin_close,omitempty" doc:"Close stdin after the initial input."`
 	// MergeStderr sends stderr through the stdout pipe, which preserves the
 	// relative order of the two.
-	MergeStderr bool `json:"merge_stderr,omitempty"`
+	MergeStderr bool `json:"merge_stderr,omitempty" doc:"Send stderr through the stdout pipe, preserving their relative order."`
 	// Timeout stops the process after this long. Zero means no timeout,
 	// unless the key's policy sets a maximum.
-	Timeout Duration `json:"timeout,omitempty"`
+	Timeout Duration `json:"timeout,omitempty" doc:"Stop the process after this long." example:"10m"`
 	// Retention is how long the session and its output are kept after the
 	// process ends. Zero means the server default.
-	Retention Duration `json:"retention,omitempty"`
+	Retention Duration `json:"retention,omitempty" doc:"Keep the session and its output this long after it ends. Defaults to the server setting." example:"24h"`
 	// Labels are free-form metadata usable as list filters.
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels,omitempty" doc:"Free-form metadata usable as list filters."`
 }
 
 // SessionState is the lifecycle state of a session.
@@ -105,18 +105,18 @@ type Session struct {
 	ID         string       `json:"id"`
 	KeyID      string       `json:"key_id"`
 	Spec       SessionSpec  `json:"spec"`
-	State      SessionState `json:"state"`
+	State      SessionState `json:"state" enum:"pending,running,exited,failed_to_start,killed,timed_out,lost"`
 	PID        int          `json:"pid,omitempty"`
-	ExitCode   *int         `json:"exit_code,omitempty"`
-	Signal     string       `json:"signal,omitempty"`
-	Error      string       `json:"error,omitempty"`
+	ExitCode   *int         `json:"exit_code,omitempty" doc:"Set when the process exited normally."`
+	Signal     string       `json:"signal,omitempty" doc:"The signal that ended the process."`
+	Error      string       `json:"error,omitempty" doc:"Why the session failed to start or was lost."`
 	CreatedAt  time.Time    `json:"created_at"`
 	StartedAt  *time.Time   `json:"started_at,omitempty"`
 	EndedAt    *time.Time   `json:"ended_at,omitempty"`
 	DurationMS *int64       `json:"duration_ms,omitempty"`
 	ExpiresAt  *time.Time   `json:"expires_at,omitempty"`
 	// StdinOpen reports whether the process's stdin still accepts input.
-	StdinOpen bool `json:"stdin_open"`
+	StdinOpen bool `json:"stdin_open" doc:"Whether stdin still accepts input."`
 }
 
 // EventType identifies the kind of a session event.
@@ -228,13 +228,13 @@ func textOrBinary(b []byte) (*string, []byte) {
 
 // SignalRequest is the body of POST /v2/sessions/{id}/signal.
 type SignalRequest struct {
-	Signal string `json:"signal"`
+	Signal string `json:"signal" doc:"Signal name, with or without the SIG prefix." example:"SIGINT"`
 }
 
 // SessionList is a page of sessions.
 type SessionList struct {
 	Sessions   []Session `json:"sessions"`
-	NextCursor string    `json:"next_cursor,omitempty"`
+	NextCursor string    `json:"next_cursor,omitempty" doc:"Pass as cursor to get the next page."`
 }
 
 // Scopes an API key can hold.
@@ -252,20 +252,20 @@ var AllScopes = []string{ScopeSessionsRun, ScopeSessionsRead, ScopeAdminRead}
 type Policy struct {
 	// AllowShell permits SessionSpec.Shell. A key that can use a shell can
 	// run any program, so Commands only constrains keys without it.
-	AllowShell *bool `json:"allow_shell,omitempty"`
+	AllowShell *bool `json:"allow_shell,omitempty" doc:"Allow shell sessions. Defaults to true. Must be false for commands to restrict anything."`
 	// Commands are regular expressions matched against the absolute path of
 	// argv[0] after PATH lookup. The pattern must match the whole path.
-	Commands []string `json:"commands,omitempty"`
+	Commands []string `json:"commands,omitempty" doc:"Regular expressions; the absolute program path must fully match one." example:"[\"/usr/bin/(git|make)\"]"`
 	// CwdRoots are directories a session's working directory must be inside.
 	// The first one is the default working directory.
-	CwdRoots []string `json:"cwd_roots,omitempty"`
+	CwdRoots []string `json:"cwd_roots,omitempty" doc:"Working directories must be inside one of these. The first is the default."`
 	// EnvAllow are regular expressions that every key of SessionSpec.Env
 	// must fully match.
-	EnvAllow []string `json:"env_allow,omitempty"`
+	EnvAllow []string `json:"env_allow,omitempty" doc:"Regular expressions every env variable name must fully match."`
 	// MaxTimeout caps SessionSpec.Timeout and is used when none is given.
-	MaxTimeout Duration `json:"max_timeout,omitempty"`
+	MaxTimeout Duration `json:"max_timeout,omitempty" doc:"Maximum session timeout, also used when none is given." example:"30m"`
 	// MaxConcurrentSessions caps how many sessions of this key run at once.
-	MaxConcurrentSessions int `json:"max_concurrent_sessions,omitempty"`
+	MaxConcurrentSessions int `json:"max_concurrent_sessions,omitempty" minimum:"0" doc:"Maximum running sessions for this key."`
 }
 
 // ShellAllowed reports whether the policy permits shell sessions. Shell is
@@ -288,34 +288,34 @@ type Key struct {
 
 // CreateKeyRequest is the body of POST /v2/keys.
 type CreateKeyRequest struct {
-	Name      string   `json:"name"`
-	Scopes    []string `json:"scopes"`
-	Policy    Policy   `json:"policy"`
-	ExpiresIn Duration `json:"expires_in,omitempty"`
+	Name      string   `json:"name" minLength:"1" maxLength:"100" example:"ci-runner"`
+	Scopes    []string `json:"scopes" minItems:"1" enum:"sessions:run,sessions:read,admin:read" example:"[\"sessions:run\", \"sessions:read\"]"`
+	Policy    Policy   `json:"policy,omitzero"`
+	ExpiresIn Duration `json:"expires_in,omitempty" doc:"The key stops working after this long." example:"720h"`
 }
 
 // UpdateKeyRequest is the body of PATCH /v2/keys/{id}. Omitted fields are
 // left unchanged.
 type UpdateKeyRequest struct {
 	Name   *string   `json:"name,omitempty"`
-	Scopes *[]string `json:"scopes,omitempty"`
+	Scopes *[]string `json:"scopes,omitempty" enum:"sessions:run,sessions:read,admin:read"`
 	Policy *Policy   `json:"policy,omitempty"`
 	// ExpiresAt sets a new expiry. Use ClearExpiry to remove it.
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	ClearExpiry bool       `json:"clear_expiry,omitempty"`
+	ClearExpiry bool       `json:"clear_expiry,omitempty" doc:"Remove the expiry."`
 }
 
 // RotateKeyRequest is the body of POST /v2/keys/{id}/rotate.
 type RotateKeyRequest struct {
 	// Grace keeps the previous secret valid for this long.
-	Grace Duration `json:"grace,omitempty"`
+	Grace Duration `json:"grace,omitempty" doc:"Keep the previous secret valid for this long." example:"1h"`
 }
 
 // KeyWithSecret is returned when a key is created or rotated. Secret is the
 // full bearer token and is shown only in this response.
 type KeyWithSecret struct {
 	Key
-	Secret string `json:"key"`
+	Secret string `json:"key" doc:"The full bearer token. Shown only in this response."`
 }
 
 // KeyList is the response to GET /v2/keys.
@@ -332,12 +332,22 @@ type Whoami struct {
 	Notes []string `json:"notes,omitempty"`
 }
 
-// Problem is an RFC 9457 problem details error response.
+// Problem is an RFC 9457 problem details error response. Validation errors
+// list each invalid field in Errors.
 type Problem struct {
-	Type   string `json:"type,omitempty"`
-	Title  string `json:"title"`
-	Status int    `json:"status"`
-	Detail string `json:"detail,omitempty"`
+	Type     string          `json:"type,omitempty"`
+	Title    string          `json:"title"`
+	Status   int             `json:"status"`
+	Detail   string          `json:"detail,omitempty"`
+	Instance string          `json:"instance,omitempty"`
+	Errors   []ProblemDetail `json:"errors,omitempty"`
+}
+
+// ProblemDetail describes one invalid part of a request.
+type ProblemDetail struct {
+	Message  string `json:"message,omitempty"`
+	Location string `json:"location,omitempty"`
+	Value    any    `json:"value,omitempty"`
 }
 
 func (p *Problem) Error() string {

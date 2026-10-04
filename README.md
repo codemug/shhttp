@@ -27,7 +27,7 @@ URL=http://127.0.0.1:2112
 MASTER=$(cat shhttp-data/master.key)
 
 curl -s -H "Authorization: Bearer $MASTER" $URL/v2/keys \
-  -d '{"name": "me", "scopes": ["sessions:run", "sessions:read"]}'
+  --json '{"name": "me", "scopes": ["sessions:run", "sessions:read"]}'
 # → {"id": "key_…", …, "key": "shh_…"}   the key is shown only once
 
 KEY="shh_…"
@@ -37,7 +37,7 @@ AUTH="Authorization: Bearer $KEY"
 ### Run a command and wait for the result
 
 ```sh
-curl -s -H "$AUTH" "$URL/v2/sessions?wait=true" -d '{"argv": ["uname", "-a"]}'
+curl -s -H "$AUTH" "$URL/v2/sessions?wait=true" --json '{"argv": ["uname", "-a"]}'
 ```
 
 ```json
@@ -49,7 +49,7 @@ Use `"shell": "ls -l | wc -l"` instead of `argv` to run a command line with `sh 
 ### Stream output while it runs
 
 ```sh
-ID=$(curl -s -H "$AUTH" $URL/v2/sessions -d '{"shell": "for i in 1 2 3; do echo $i; sleep 1; done"}' | jq -r .id)
+ID=$(curl -s -H "$AUTH" $URL/v2/sessions --json '{"shell": "for i in 1 2 3; do echo $i; sleep 1; done"}' | jq -r .id)
 
 curl -sN -H "$AUTH" "$URL/v2/sessions/$ID/events?follow=true"              # one JSON event per line
 curl -sN -H "$AUTH" "$URL/v2/sessions/$ID/events?follow=true&format=raw"   # just the stdout bytes
@@ -61,7 +61,7 @@ Add `from=<seq>` to resume after a disconnect. SSE clients resume automatically 
 ### Send stdin to a running process
 
 ```sh
-ID=$(curl -s -H "$AUTH" $URL/v2/sessions -d '{"argv": ["python3", "-u", "-i"], "merge_stderr": true}' | jq -r .id)
+ID=$(curl -s -H "$AUTH" $URL/v2/sessions --json '{"argv": ["python3", "-u", "-i"], "merge_stderr": true}' | jq -r .id)
 curl -sN -H "$AUTH" "$URL/v2/sessions/$ID/events?follow=true&format=raw" &
 
 curl -s -H "$AUTH" "$URL/v2/sessions/$ID/stdin" --data-binary $'print(6 * 7)\n'
@@ -70,9 +70,32 @@ curl -s -H "$AUTH" "$URL/v2/sessions/$ID/stdin?close=true" --data-binary $'print
 
 `close=true` closes stdin after writing, which is how a program reading its input learns it has ended.
 
+`--json` (curl 7.82 or newer) sends the body with `Content-Type: application/json`, which JSON endpoints require; with older curl use `-H 'Content-Type: application/json' -d '…'`. The stdin endpoint takes raw bytes with any content type.
+
 ## API
 
-All endpoints except `/healthz` and `/v2/version` need `Authorization: Bearer <key>`. Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`.
+The server publishes its own OpenAPI 3.1 description, generated from the code with [huma](https://github.com/danielgtaylor/huma):
+
+- `GET /v2/openapi.json` and `/v2/openapi.yaml`: the document, for generating clients in any language.
+- `GET /v2/docs`: interactive API reference in the browser.
+- `shhttpd openapi` prints the document without starting a server, and [docs/openapi.yaml](docs/openapi.yaml) is a committed copy.
+
+All endpoints except `/healthz`, `/v2/version` and the API description need `Authorization: Bearer <key>`. JSON request bodies are validated against the schema, and unknown fields are rejected. Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`:
+
+| Status | Meaning |
+|---|---|
+| 400 | Malformed JSON, or a request the schema allows but the server rejects (for example both `argv` and `shell`). `detail` says why. |
+| 401 / 403 | Missing or invalid key / the key lacks the scope or its policy forbids the request. |
+| 404 | No such resource, or it belongs to another key. |
+| 409 | The session is not running, or its stdin is closed. |
+| 415 | A JSON endpoint received a body without `Content-Type: application/json`. |
+| 422 | The request does not match the schema. `errors` lists each problem and where it is, such as `body.argv`. |
+| 429 | A concurrency limit was reached. |
+
+```json
+{"title": "Unprocessable Entity", "status": 422, "detail": "validation failed",
+ "errors": [{"message": "unexpected property", "location": "body.oops", "value": {"argv": ["true"], "oops": 1}}]}
+```
 
 | Endpoint | Scope | Purpose |
 |---|---|---|
@@ -167,6 +190,12 @@ docker run --rm -v shhttp-data:/data alpine cat /data/master.key
 
 ```sh
 go test -race ./internal/... ./pkg/api/...
+```
+
+`docs/openapi.yaml` must match the code; a test fails when it does not. After changing an endpoint or an API type, regenerate it:
+
+```sh
+go test ./internal/server -run TestOpenAPIFileIsCurrent -update
 ```
 
 ## License

@@ -1,122 +1,153 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
-	"github.com/codemug/shhttp/internal/auth"
 	"github.com/codemug/shhttp/internal/id"
 	"github.com/codemug/shhttp/pkg/api"
+	"github.com/danielgtaylor/huma/v2"
 )
 
-func (s *Server) createKey(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	var req api.CreateKeyRequest
-	if err := decodeJSON(w, r, &req, maxJSONBody, false); err != nil {
-		s.writeError(w, err)
-		return
-	}
-	k, err := s.auth.CreateKey(r.Context(), req)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	s.log.Info("key created", "audit", true, "key", k.ID, "name", k.Name, "scopes", k.Scopes)
-	w.Header().Set("Location", "/v2/keys/"+k.ID)
-	writeJSON(w, http.StatusCreated, k)
+// KeyPath is the {id} of key operations. It is exported because huma can only
+// fill fields of exported embedded structs.
+type KeyPath struct {
+	ID string `path:"id" doc:"Key id" example:"key_01j9z3k5q8m2x7v4w6t0b1c3d5"`
 }
 
-func (s *Server) listKeys(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	keys, err := s.auth.ListKeys(r.Context())
-	if err != nil {
-		s.writeError(w, err)
-		return
+// valid answers 404 for anything that is not a key id.
+func (k KeyPath) valid() error {
+	if !id.Valid(id.Key, k.ID) {
+		return huma.Error404NotFound("not found")
 	}
-	if keys == nil {
-		keys = []api.Key{}
-	}
-	writeJSON(w, http.StatusOK, api.KeyList{Keys: keys})
+	return nil
 }
 
-// keyID returns the {id} path value, or "" after answering 404 when it is not
-// a key id.
-func keyID(w http.ResponseWriter, r *http.Request) string {
-	v := r.PathValue("id")
-	if !id.Valid(id.Key, v) {
-		writeProblem(w, http.StatusNotFound, "not found")
-		return ""
-	}
-	return v
+type createKeyInput struct {
+	Body api.CreateKeyRequest
 }
 
-func (s *Server) getKey(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	kid := keyID(w, r)
-	if kid == "" {
-		return
-	}
-	k, err := s.auth.GetKey(r.Context(), kid)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, k)
+type keyWithSecretOutput struct {
+	Location string `header:"Location"`
+	Body     api.KeyWithSecret
 }
 
-func (s *Server) updateKey(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	kid := keyID(w, r)
-	if kid == "" {
-		return
-	}
-	var req api.UpdateKeyRequest
-	if err := decodeJSON(w, r, &req, maxJSONBody, false); err != nil {
-		s.writeError(w, err)
-		return
-	}
-	k, err := s.auth.UpdateKey(r.Context(), kid, req)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	s.log.Info("key updated", "audit", true, "key", k.ID, "scopes", k.Scopes)
-	writeJSON(w, http.StatusOK, k)
+type keyOutput struct{ Body api.Key }
+
+type keyListOutput struct{ Body api.KeyList }
+
+type updateKeyInput struct {
+	KeyPath
+	Body api.UpdateKeyRequest
 }
 
-func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	kid := keyID(w, r)
-	if kid == "" {
-		return
-	}
-	var req api.RotateKeyRequest
-	if err := decodeJSON(w, r, &req, maxJSONBody, true); err != nil {
-		s.writeError(w, err)
-		return
-	}
-	k, err := s.auth.RotateKey(r.Context(), kid, req.Grace.Std())
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	s.log.Info("key rotated", "audit", true, "key", k.ID, "grace", req.Grace.Std().String())
-	writeJSON(w, http.StatusOK, k)
+type rotateKeyInput struct {
+	KeyPath
+	Body *api.RotateKeyRequest `required:"false"`
 }
 
-func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
-	kid := keyID(w, r)
-	if kid == "" {
-		return
-	}
-	kill, err := boolParam(r, "kill_sessions")
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	k, err := s.auth.RevokeKey(r.Context(), kid)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	resp := api.RevokeKeyResponse{Key: k}
-	if kill {
-		resp.KilledSessions = s.sessions.KillByKey(kid)
-	}
-	s.log.Info("key revoked", "audit", true, "key", k.ID, "killed_sessions", resp.KilledSessions)
-	writeJSON(w, http.StatusOK, resp)
+type revokeKeyInput struct {
+	KeyPath
+	KillSessions bool `query:"kill_sessions" doc:"Also kill the key's running sessions."`
+}
+
+type revokeKeyOutput struct{ Body api.RevokeKeyResponse }
+
+func (s *Server) registerKeys() {
+	master := access{master: true}
+
+	op := operation("create-key", http.MethodPost, "/v2/keys", "Create an API key", "Keys", master)
+	op.Description = "The response contains the full key in `key`. It is shown only once."
+	op.DefaultStatus = http.StatusCreated
+	op.MaxBodyBytes = maxJSONBody
+	op.Errors = append(op.Errors, http.StatusBadRequest)
+	huma.Register(s.api, op, func(ctx context.Context, in *createKeyInput) (*keyWithSecretOutput, error) {
+		k, err := s.auth.CreateKey(ctx, in.Body)
+		if err != nil {
+			return nil, s.apiError(err)
+		}
+		s.log.Info("key created", "audit", true, "key", k.ID, "name", k.Name, "scopes", k.Scopes)
+		return &keyWithSecretOutput{Location: "/v2/keys/" + k.ID, Body: k}, nil
+	})
+
+	op = operation("list-keys", http.MethodGet, "/v2/keys", "List API keys", "Keys", master)
+	op.Description = "Includes revoked and expired keys. Secrets are never returned."
+	huma.Register(s.api, op, func(ctx context.Context, _ *struct{}) (*keyListOutput, error) {
+		keys, err := s.auth.ListKeys(ctx)
+		if err != nil {
+			return nil, s.apiError(err)
+		}
+		if keys == nil {
+			keys = []api.Key{}
+		}
+		return &keyListOutput{Body: api.KeyList{Keys: keys}}, nil
+	})
+
+	op = operation("get-key", http.MethodGet, "/v2/keys/{id}", "Get an API key", "Keys", master)
+	op.Errors = append(op.Errors, http.StatusNotFound)
+	huma.Register(s.api, op, func(ctx context.Context, in *KeyPath) (*keyOutput, error) {
+		if err := in.valid(); err != nil {
+			return nil, err
+		}
+		k, err := s.auth.GetKey(ctx, in.ID)
+		if err != nil {
+			return nil, s.apiError(err)
+		}
+		return &keyOutput{Body: k}, nil
+	})
+
+	op = operation("update-key", http.MethodPatch, "/v2/keys/{id}", "Update an API key", "Keys", master)
+	op.Description = "Changes the name, scopes, policy or expiry. Omitted fields are left unchanged."
+	op.MaxBodyBytes = maxJSONBody
+	op.Errors = append(op.Errors, http.StatusBadRequest, http.StatusNotFound, http.StatusConflict)
+	huma.Register(s.api, op, func(ctx context.Context, in *updateKeyInput) (*keyOutput, error) {
+		if err := in.valid(); err != nil {
+			return nil, err
+		}
+		k, err := s.auth.UpdateKey(ctx, in.ID, in.Body)
+		if err != nil {
+			return nil, s.apiError(err)
+		}
+		s.log.Info("key updated", "audit", true, "key", k.ID, "scopes", k.Scopes)
+		return &keyOutput{Body: k}, nil
+	})
+
+	op = operation("rotate-key", http.MethodPost, "/v2/keys/{id}/rotate", "Issue a new secret for an API key", "Keys", master)
+	op.Description = "Returns the new full key once. With `grace`, the previous secret keeps working for that long; otherwise it stops working immediately."
+	op.MaxBodyBytes = maxJSONBody
+	op.Errors = append(op.Errors, http.StatusNotFound, http.StatusConflict)
+	huma.Register(s.api, op, func(ctx context.Context, in *rotateKeyInput) (*keyWithSecretOutput, error) {
+		if err := in.valid(); err != nil {
+			return nil, err
+		}
+		var grace api.Duration
+		if in.Body != nil {
+			grace = in.Body.Grace
+		}
+		k, err := s.auth.RotateKey(ctx, in.ID, grace.Std())
+		if err != nil {
+			return nil, s.apiError(err)
+		}
+		s.log.Info("key rotated", "audit", true, "key", k.ID, "grace", grace.Std().String())
+		return &keyWithSecretOutput{Body: k}, nil
+	})
+
+	op = operation("revoke-key", http.MethodDelete, "/v2/keys/{id}", "Revoke an API key", "Keys", master)
+	op.Description = "Revocation is permanent. The key's running sessions keep running unless `kill_sessions=true`."
+	op.Errors = append(op.Errors, http.StatusNotFound)
+	huma.Register(s.api, op, func(ctx context.Context, in *revokeKeyInput) (*revokeKeyOutput, error) {
+		if err := in.valid(); err != nil {
+			return nil, err
+		}
+		k, err := s.auth.RevokeKey(ctx, in.ID)
+		if err != nil {
+			return nil, s.apiError(err)
+		}
+		resp := api.RevokeKeyResponse{Key: k}
+		if in.KillSessions {
+			resp.KilledSessions = s.sessions.KillByKey(in.ID)
+		}
+		s.log.Info("key revoked", "audit", true, "key", k.ID, "killed_sessions", resp.KilledSessions)
+		return &revokeKeyOutput{Body: resp}, nil
+	})
 }

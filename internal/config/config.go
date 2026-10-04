@@ -157,6 +157,6 @@ func Usage(output io.Writer) {
 	c := Defaults()
 	fs := newFlagSet(&c)
 	fs.SetOutput(output)
-	fmt.Fprintf(output, "Usage: shhttpd [flags]\n       shhttpd keygen    print a new random master key\n       shhttpd version\n\nEvery flag can also be set with an environment variable, e.g. --data-dir as %s.\n\nFlags:\n", EnvName("data-dir"))
+	fmt.Fprintf(output, "Usage: shhttpd [flags]\n       shhttpd keygen    print a new random master key\n       shhttpd version\n       shhttpd openapi   print the OpenAPI document (YAML)\n\nEvery flag can also be set with an environment variable, e.g. --data-dir as %s.\n\nFlags:\n", EnvName("data-dir"))
 	fs.PrintDefaults()
 }

@@ -34,6 +34,14 @@ func main() {
 		case "version":
 			fmt.Println(version)
 			return
+		case "openapi":
+			doc, err := server.OpenAPIYAML()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "shhttpd:", err)
+				os.Exit(1)
+			}
+			os.Stdout.Write(doc)
+			return
 		}
 	}
 	cfg, err := config.Load(os.Args[1:], os.Getenv)
