@@ -1,17 +1,17 @@
-FROM golang:1.14-alpine
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/shhttpd ./cmd/shhttpd
 
-RUN mkdir -p /go/src/github.com/codemug/shhttp && \
-    apk update && apk add alpine-sdk
-
-ADD . /go/src/github.com/codemug/shhttp
-
-RUN cd /go/src/github.com/codemug/shhttp && \
-    go mod tidy && \
-    go test github.com/codemug/shhttp/pkg -v && \
-    go build -o /go/bin/shhttp github.com/codemug/shhttp/cmd/shhttp
-
-FROM alpine:3.11
-
-COPY --from=0 /go/bin/shhttp /usr/local/bin/shhttp
-
-ENTRYPOINT ["/usr/local/bin/shhttp"]
+# Alpine rather than distroless: sessions need a shell and basic tools.
+FROM alpine:3
+RUN adduser -D -u 10001 shhttp && mkdir /data && chown shhttp /data
+COPY --from=build /out/shhttpd /usr/local/bin/shhttpd
+USER shhttp
+ENV SHHTTP_LISTEN=0.0.0.0:2112 SHHTTP_DATA_DIR=/data
+VOLUME /data
+EXPOSE 2112
+ENTRYPOINT ["/usr/local/bin/shhttpd"]

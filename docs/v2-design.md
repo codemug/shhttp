@@ -37,7 +37,7 @@ Everything is built on one primitive, the **session**: a single process plus an 
 
 `pending → running → exited | failed_to_start | killed | timed_out | lost`
 
-`lost` means the server stopped while the process was running. Child processes are tied to the server (`Pdeathsig` on Linux, process-group kill on shutdown), so a session cannot keep running unobserved after a restart.
+`lost` means the server stopped while the process was running. On a clean shutdown the server stops every session first. After a crash, the session's own process dies with the server on Linux (`Pdeathsig`), but processes it started itself can survive; see Known limitations.
 
 ## API overview
 
@@ -52,6 +52,7 @@ Base path `/v2`. JSON everywhere except the streaming formats listed below. Erro
 | | `POST /v2/sessions/{id}/stdin` | Write the request body (streamed) to stdin. `?close=true` closes stdin afterwards. |
 | | `POST /v2/sessions/{id}/signal` | `{"signal":"SIGINT"}` |
 | | `POST /v2/sessions/{id}/resize` | `{"cols":120,"rows":40}` (TTY sessions only). |
+| | `POST /v2/sessions/{id}/kill` | SIGTERM, then SIGKILL after the grace period. The record and output are kept. |
 | | `DELETE /v2/sessions/{id}` | Kill if running, then delete the record and its log. |
 | | `GET /v2/sessions/{id}/attach` | WebSocket: attach to an existing session. |
 | | `GET /v2/exec` | WebSocket: create and attach in one round trip. |
@@ -100,7 +101,7 @@ Every session event has a global, gap-free sequence number:
 {"seq":5, "time":"…", "type":"exit", "exit_code":0, "signal":null, "duration_ms":812}
 ```
 
-- Output is sent as **chunks**, not lines: programs print partial lines, progress bars, binary data and terminal escape codes. `?lines=true` makes the server buffer output into complete lines for clients that want them.
+- Output is sent as **chunks**, not lines: programs print partial lines, progress bars, binary data and terminal escape codes. A later `?lines=true` option will make the server buffer output into complete lines for clients that want them. A UTF-8 character split across two reads is held back and sent whole.
 - A client resumes with `?from=<last seq + 1>` (or `Last-Event-ID` for SSE).
 - A subscriber that falls too far behind the in-memory buffer is served from the disk log transparently; it never misses events.
 
@@ -114,7 +115,7 @@ Every session event has a global, gap-free sequence number:
 
 ### `?wait=true` (request/response mode)
 
-Blocks until the session ends (or `wait_timeout`), then returns metadata plus collected output. Output is capped (`max_output`, default 1 MiB per stream) with `truncated: true` and the option to keep the head, the tail or both. This is the simplest interface for scripts and for agents that call a tool and read the result.
+Blocks until the session ends (or `wait_timeout`), then returns metadata plus collected output. Output is capped (`max_output`, default 1 MiB per stream) with `stdout_truncated`/`stderr_truncated`, keeping the tail by default or the head with `keep=head`. Because nobody else knows the session id yet, stdin is closed after any initial `stdin`. If the client disconnects, the session keeps running. This is the simplest interface for scripts and for agents that call a tool and read the result.
 
 ### WebSocket protocol
 
@@ -277,6 +278,8 @@ POST /v2/templates/deploy/run  {"params": {"branch": "release/2.0"}}
 - TTY sessions use `github.com/creack/pty`. TTY output is a single stream (`stdout`).
 - Exit info: `exit_code`, or `signal` when killed by one; `duration_ms`.
 - Timeouts send `SIGTERM`, then `SIGKILL` after a grace period (`--kill-grace`, default 10s). Server shutdown does the same for all sessions and marks unfinished jobs according to `on_restart`.
+- PATH lookup for `argv[0]` uses the server's `PATH`, not one set in the session's `env`. The resolved absolute path is what policies match and what runs.
+- When the session's process exits, anything left in its process group is killed, and the server waits at most 2 seconds for leftover processes holding stdout or stderr open.
 - Platforms: Linux and macOS fully supported. Windows: no TTY in v2.0, Job Objects instead of process groups, `cmd /C` for `shell`.
 
 ## Server configuration
@@ -312,7 +315,7 @@ pkg/client/           Go SDK
 docs/                 this design, protocol spec, OpenAPI
 ```
 
-Dependencies kept small: `github.com/coder/websocket`, `modernc.org/sqlite`, `github.com/creack/pty`, `github.com/prometheus/client_golang`. Standard library for routing (`net/http` patterns), logging (`log/slog`) and flags. Go 1.23+.
+Dependencies kept small: `github.com/coder/websocket`, `modernc.org/sqlite`, `github.com/creack/pty`, `github.com/prometheus/client_golang`. Standard library for routing (`net/http` patterns), logging (`log/slog`) and flags. Go 1.26+.
 
 ## Testing and release
 
@@ -328,8 +331,20 @@ Dependencies kept small: `github.com/coder/websocket`, `modernc.org/sqlite`, `gi
 4. **Hardening**: TTY, policies, limits, audit log, metrics, retention sweeper, TLS and client certificates, rate limiting.
 5. **Ship**: OpenAPI document, protocol spec, README rewrite, Dockerfile, CI and releases. Then the MCP mode.
 
-## Open questions
+## Known limitations
 
-1. Should the master key be allowed to run commands as a convenience for single-user setups? (Current answer: no.)
-2. Should sessions owned by a revoked key keep running? (Proposed: yes, but nobody but `admin:read` can see them; add `?kill_sessions=true` to revoke.)
-3. Config file format: YAML or TOML?
+- **Sessions run as the server's OS user.** A key that may run arbitrary programs can therefore read everything that user can: the data directory (including `master.key` and other keys' session logs) and, through `/proc`, the server's original environment. Policies limit which programs run, not which files those programs read. Until `run_as` (phase 4) runs sessions as a separate, unprivileged user, treat any key without a strict `commands` policy and `allow_shell: false` as equivalent to the master key. The server already removes `SHHTTP_MASTER_KEY` from the environment sessions inherit.
+- **Processes can outlive a server crash.** After `kill -9` or a crash, Linux kills the session's own process, but processes it started (for example the `sleep` in `sh -c "sleep 60; true"`) keep running, and on macOS nothing is killed. The session is still marked `lost` on restart. Phase 4 will put each session in its own cgroup on Linux so the whole tree can be killed, including on restart.
+- A stdin write that the process never reads blocks other stdin writes to the same session until the process reads, exits or is killed.
+
+## Implementation status
+
+Phase 1 is implemented: config (YAML, env, flags), SQLite store, master key and the keys API (create, list, get, update, rotate with grace, revoke with optional `kill_sessions`), scopes and key policies (enforced already, ahead of phase 4: `allow_shell`, `commands`, `cwd_roots`, `env_allow`, `max_timeout`, `max_concurrent_sessions`), the session engine, all session HTTP endpoints with NDJSON, SSE and raw streaming, `wait=true`, the retention sweeper, an audit log and graceful shutdown.
+
+Not yet implemented from this document: WebSocket, `?lines=true`, TTY, `run_as`, `max_output_bytes` and `templates` policies, `on_disconnect`, jobs, queues, templates, metrics, client certificates, rate limiting, the CLI and SDK.
+
+## Decisions
+
+1. The master key cannot run commands. It manages API keys only.
+2. Revoking a key leaves its running sessions running; only `admin:read` keys can still see them. `DELETE /v2/keys/{id}?kill_sessions=true` revokes and kills them in one call.
+3. The config file is YAML.

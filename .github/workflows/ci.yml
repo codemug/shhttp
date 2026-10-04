@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [master, v2]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./internal/... ./pkg/api/... ./cmd/shhttpd/...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./internal/... ./pkg/api/... ./cmd/shhttpd/...
+      - name: Test
+        run: go test -race ./internal/... ./pkg/api/... ./cmd/shhttpd/...
+      - name: Cross-compile for Windows
+        run: GOOS=windows go build ./cmd/shhttpd

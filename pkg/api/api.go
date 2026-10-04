@@ -1,0 +1,367 @@
+// Package api defines the request, response and event types of the shhttp v2
+// API. It is shared by the server and by clients.
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"time"
+	"unicode/utf8"
+)
+
+// Marshal encodes v as JSON without escaping <, > and &, which keeps command
+// output readable. The result has no trailing newline.
+func Marshal(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// Duration is a time.Duration that is written in JSON as a Go duration
+// string such as "1m30s".
+type Duration time.Duration
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("duration must be a string such as \"30s\": %w", err)
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	if v < 0 {
+		return fmt.Errorf("duration %q is negative", s)
+	}
+	*d = Duration(v)
+	return nil
+}
+
+// Std returns d as a time.Duration.
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// SessionSpec describes the process a session runs.
+type SessionSpec struct {
+	// Argv is the program and its arguments. Exactly one of Argv and Shell
+	// must be set.
+	Argv []string `json:"argv,omitempty"`
+	// Shell is a command line run with "sh -c" ("cmd /C" on Windows).
+	Shell string `json:"shell,omitempty"`
+	// Env holds extra environment variables.
+	Env map[string]string `json:"env,omitempty"`
+	// InheritEnv starts the process from the server's environment. Defaults
+	// to true.
+	InheritEnv *bool `json:"inherit_env,omitempty"`
+	// Cwd is the working directory.
+	Cwd string `json:"cwd,omitempty"`
+	// Stdin is written to the process's stdin when it starts. StdinB64 is
+	// the same for binary input. At most one may be set.
+	Stdin    string `json:"stdin,omitempty"`
+	StdinB64 []byte `json:"stdin_b64,omitempty"`
+	// StdinClose closes stdin after the initial input is written.
+	StdinClose bool `json:"stdin_close,omitempty"`
+	// MergeStderr sends stderr through the stdout pipe, which preserves the
+	// relative order of the two.
+	MergeStderr bool `json:"merge_stderr,omitempty"`
+	// Timeout stops the process after this long. Zero means no timeout,
+	// unless the key's policy sets a maximum.
+	Timeout Duration `json:"timeout,omitempty"`
+	// Retention is how long the session and its output are kept after the
+	// process ends. Zero means the server default.
+	Retention Duration `json:"retention,omitempty"`
+	// Labels are free-form metadata usable as list filters.
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// SessionState is the lifecycle state of a session.
+type SessionState string
+
+const (
+	StatePending       SessionState = "pending"
+	StateRunning       SessionState = "running"
+	StateExited        SessionState = "exited"
+	StateFailedToStart SessionState = "failed_to_start"
+	StateKilled        SessionState = "killed"
+	StateTimedOut      SessionState = "timed_out"
+	StateLost          SessionState = "lost"
+)
+
+// Finished reports whether the state is terminal.
+func (s SessionState) Finished() bool {
+	return s != StatePending && s != StateRunning
+}
+
+// Session is a session's metadata.
+type Session struct {
+	ID         string       `json:"id"`
+	KeyID      string       `json:"key_id"`
+	Spec       SessionSpec  `json:"spec"`
+	State      SessionState `json:"state"`
+	PID        int          `json:"pid,omitempty"`
+	ExitCode   *int         `json:"exit_code,omitempty"`
+	Signal     string       `json:"signal,omitempty"`
+	Error      string       `json:"error,omitempty"`
+	CreatedAt  time.Time    `json:"created_at"`
+	StartedAt  *time.Time   `json:"started_at,omitempty"`
+	EndedAt    *time.Time   `json:"ended_at,omitempty"`
+	DurationMS *int64       `json:"duration_ms,omitempty"`
+	ExpiresAt  *time.Time   `json:"expires_at,omitempty"`
+	// StdinOpen reports whether the process's stdin still accepts input.
+	StdinOpen bool `json:"stdin_open"`
+}
+
+// EventType identifies the kind of a session event.
+type EventType string
+
+const (
+	EventStarted     EventType = "started"
+	EventStdout      EventType = "stdout"
+	EventStderr      EventType = "stderr"
+	EventStdinClosed EventType = "stdin_closed"
+	EventSignal      EventType = "signal"
+	EventExit        EventType = "exit"
+	EventError       EventType = "error"
+)
+
+// Event is one entry in a session's event log. Seq starts at 1 and has no
+// gaps.
+type Event struct {
+	Seq  uint64    `json:"seq"`
+	Time time.Time `json:"time"`
+	Type EventType `json:"type"`
+	// Data is the output chunk of stdout and stderr events. In JSON it is
+	// written as "data" when it is valid UTF-8 and as "data_b64" otherwise.
+	Data []byte `json:"-"`
+	// started
+	PID int `json:"pid,omitempty"`
+	// signal (the signal that was sent) and exit (the signal that killed the
+	// process, if any)
+	Signal string `json:"signal,omitempty"`
+	// exit
+	State      SessionState `json:"state,omitempty"`
+	ExitCode   *int         `json:"exit_code,omitempty"`
+	DurationMS *int64       `json:"duration_ms,omitempty"`
+	// error
+	Error string `json:"error,omitempty"`
+}
+
+type eventJSON struct {
+	*eventAlias
+	Data    *string `json:"data,omitempty"`
+	DataB64 []byte  `json:"data_b64,omitempty"`
+}
+
+type eventAlias Event
+
+func (e Event) MarshalJSON() ([]byte, error) {
+	out := eventJSON{eventAlias: (*eventAlias)(&e)}
+	if e.Data != nil {
+		if utf8.Valid(e.Data) {
+			s := string(e.Data)
+			out.Data = &s
+		} else {
+			out.DataB64 = e.Data
+		}
+	}
+	return Marshal(out)
+}
+
+func (e *Event) UnmarshalJSON(b []byte) error {
+	in := eventJSON{eventAlias: (*eventAlias)(e)}
+	if err := json.Unmarshal(b, &in); err != nil {
+		return err
+	}
+	switch {
+	case in.Data != nil:
+		e.Data = []byte(*in.Data)
+	case in.DataB64 != nil:
+		e.Data = in.DataB64
+	}
+	return nil
+}
+
+// RunResult is the response to POST /v2/sessions?wait=true.
+type RunResult struct {
+	Session Session `json:"session"`
+	Output
+}
+
+// Output holds collected output. Each stream is written as a string when it
+// is valid UTF-8 and as base64 in the *_b64 field otherwise.
+type Output struct {
+	Stdout          *string `json:"stdout,omitempty"`
+	StdoutB64       []byte  `json:"stdout_b64,omitempty"`
+	StdoutTruncated bool    `json:"stdout_truncated,omitempty"`
+	Stderr          *string `json:"stderr,omitempty"`
+	StderrB64       []byte  `json:"stderr_b64,omitempty"`
+	StderrTruncated bool    `json:"stderr_truncated,omitempty"`
+}
+
+// SetStdout stores b in the field that suits its encoding.
+func (o *Output) SetStdout(b []byte, truncated bool) {
+	o.Stdout, o.StdoutB64 = textOrBinary(b)
+	o.StdoutTruncated = truncated
+}
+
+// SetStderr stores b in the field that suits its encoding.
+func (o *Output) SetStderr(b []byte, truncated bool) {
+	o.Stderr, o.StderrB64 = textOrBinary(b)
+	o.StderrTruncated = truncated
+}
+
+func textOrBinary(b []byte) (*string, []byte) {
+	if utf8.Valid(b) {
+		s := string(b)
+		return &s, nil
+	}
+	return nil, b
+}
+
+// SignalRequest is the body of POST /v2/sessions/{id}/signal.
+type SignalRequest struct {
+	Signal string `json:"signal"`
+}
+
+// SessionList is a page of sessions.
+type SessionList struct {
+	Sessions   []Session `json:"sessions"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// Scopes an API key can hold.
+const (
+	ScopeSessionsRun  = "sessions:run"
+	ScopeSessionsRead = "sessions:read"
+	ScopeAdminRead    = "admin:read"
+)
+
+// AllScopes lists every scope the server currently understands.
+var AllScopes = []string{ScopeSessionsRun, ScopeSessionsRead, ScopeAdminRead}
+
+// Policy restricts what sessions an API key may start. Empty fields impose
+// no restriction.
+type Policy struct {
+	// AllowShell permits SessionSpec.Shell. A key that can use a shell can
+	// run any program, so Commands only constrains keys without it.
+	AllowShell *bool `json:"allow_shell,omitempty"`
+	// Commands are regular expressions matched against the absolute path of
+	// argv[0] after PATH lookup. The pattern must match the whole path.
+	Commands []string `json:"commands,omitempty"`
+	// CwdRoots are directories a session's working directory must be inside.
+	// The first one is the default working directory.
+	CwdRoots []string `json:"cwd_roots,omitempty"`
+	// EnvAllow are regular expressions that every key of SessionSpec.Env
+	// must fully match.
+	EnvAllow []string `json:"env_allow,omitempty"`
+	// MaxTimeout caps SessionSpec.Timeout and is used when none is given.
+	MaxTimeout Duration `json:"max_timeout,omitempty"`
+	// MaxConcurrentSessions caps how many sessions of this key run at once.
+	MaxConcurrentSessions int `json:"max_concurrent_sessions,omitempty"`
+}
+
+// ShellAllowed reports whether the policy permits shell sessions. Shell is
+// allowed unless explicitly disabled.
+func (p Policy) ShellAllowed() bool { return p.AllowShell == nil || *p.AllowShell }
+
+// Key is an API key's metadata. The secret is never included.
+type Key struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Scopes     []string   `json:"scopes"`
+	Policy     Policy     `json:"policy"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	// PreviousSecretValidUntil is set after a rotation with a grace period.
+	PreviousSecretValidUntil *time.Time `json:"previous_secret_valid_until,omitempty"`
+}
+
+// CreateKeyRequest is the body of POST /v2/keys.
+type CreateKeyRequest struct {
+	Name      string   `json:"name"`
+	Scopes    []string `json:"scopes"`
+	Policy    Policy   `json:"policy"`
+	ExpiresIn Duration `json:"expires_in,omitempty"`
+}
+
+// UpdateKeyRequest is the body of PATCH /v2/keys/{id}. Omitted fields are
+// left unchanged.
+type UpdateKeyRequest struct {
+	Name   *string   `json:"name,omitempty"`
+	Scopes *[]string `json:"scopes,omitempty"`
+	Policy *Policy   `json:"policy,omitempty"`
+	// ExpiresAt sets a new expiry. Use ClearExpiry to remove it.
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	ClearExpiry bool       `json:"clear_expiry,omitempty"`
+}
+
+// RotateKeyRequest is the body of POST /v2/keys/{id}/rotate.
+type RotateKeyRequest struct {
+	// Grace keeps the previous secret valid for this long.
+	Grace Duration `json:"grace,omitempty"`
+}
+
+// KeyWithSecret is returned when a key is created or rotated. Secret is the
+// full bearer token and is shown only in this response.
+type KeyWithSecret struct {
+	Key
+	Secret string `json:"key"`
+}
+
+// KeyList is the response to GET /v2/keys.
+type KeyList struct {
+	Keys []Key `json:"keys"`
+}
+
+// Whoami is the response to GET /v2/whoami.
+type Whoami struct {
+	Master bool `json:"master"`
+	Key    *Key `json:"key,omitempty"`
+	// Notes describe consequences of the key's policy, for example that
+	// shell access makes a command allowlist ineffective.
+	Notes []string `json:"notes,omitempty"`
+}
+
+// Problem is an RFC 9457 problem details error response.
+type Problem struct {
+	Type   string `json:"type,omitempty"`
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+func (p *Problem) Error() string {
+	if p.Detail != "" {
+		return fmt.Sprintf("%d %s: %s", p.Status, p.Title, p.Detail)
+	}
+	return fmt.Sprintf("%d %s", p.Status, p.Title)
+}
+
+// RevokeKeyResponse is the response to DELETE /v2/keys/{id}.
+type RevokeKeyResponse struct {
+	Key Key `json:"key"`
+	// KilledSessions is how many running sessions were killed
+	// (?kill_sessions=true).
+	KilledSessions int `json:"killed_sessions"`
+}
+
+// StdinResponse is the response to POST /v2/sessions/{id}/stdin.
+type StdinResponse struct {
+	Bytes     int64 `json:"bytes"`
+	StdinOpen bool  `json:"stdin_open"`
+}
+
+// Version is the response to GET /v2/version.
+type Version struct {
+	Version string `json:"version"`
+}
