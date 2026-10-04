@@ -83,7 +83,6 @@ The HTTP layer is built with [huma](https://github.com/danielgtaylor/huma) on th
   "tty": null,                              // or {"cols":80,"rows":24} to run under a pseudo-terminal
   "merge_stderr": false,                    // send stderr through the stdout pipe to keep ordering
   "timeout": "10m",
-  "on_disconnect": "keep",                  // keep | kill | kill_after:<duration> (applies to /v2/exec)
   "retention": "24h",                       // how long the record and output are kept after exit
   "labels": {"team": "infra"}
 }
@@ -121,26 +120,34 @@ Blocks until the session ends (or `wait_timeout`), then returns metadata plus co
 
 ### WebSocket protocol
 
-Subprotocol `shhttp.v2.json`. Text frames carrying JSON messages.
+Endpoints: `GET /v2/exec` starts a session; `GET /v2/sessions/{id}/attach?from=<seq>&readonly=<bool>` connects to an existing one. Clients offer the subprotocol `shhttp.v2.json`; all messages are JSON text frames.
 
 Client → server:
 
 ```jsonc
-{"type":"start", "spec":{…session spec…}}        // first message on /v2/exec only
-{"type":"stdin", "data":"print(1)\n"}            // or "data_b64"
+{"type":"start", "spec":{…session spec…}, "on_disconnect":"kill"}   // first message on /v2/exec only
+{"type":"stdin", "data":"print(1)\n"}                               // or "data_b64" for binary input
 {"type":"stdin_close"}
 {"type":"signal", "signal":"SIGINT"}
-{"type":"resize", "cols":120, "rows":40}
-{"type":"ack", "seq":42}                          // optional flow control, see below
 ```
 
-Server → client: the same event objects as above, plus `{"type":"error", …}` for protocol errors.
+Server → client:
 
-- `GET /v2/sessions/{id}/attach?from=<seq>` replays from `seq` then follows.
-- Several clients can attach to one session. All receive output; all may write stdin (a `readonly=true` attach is available).
-- **Closing stdin is an explicit message.** Closing the WebSocket is not the same as EOF on stdin; the session's `on_disconnect` decides what happens to the process.
-- Flow control: the server keeps at most a window of unacknowledged events in flight per connection; clients that never send `ack` get the default WebSocket backpressure only. Because output is on disk, a slow client cannot stall the process.
-- A binary subprotocol (`shhttp.v2.binary`, one channel byte + payload) can be added later for high-throughput output without base64.
+```jsonc
+{"type":"session", "session":{…}}                    // always first: the session, including its id
+{"seq":1, "type":"started", "pid":4242, …}             // then the session's events, exactly as in GET …/events
+{"type":"protocol_error", "status":403, "error":"…"}  // a rejected message; status is what HTTP would answer
+```
+
+- The server closes the connection with status 1000 after the `exit` event (or at once, after replaying, for a finished session). A start that fails gets a `protocol_error` and close status 1008.
+- `on_disconnect` (exec only) decides what happens when the connection closes: `keep` (default), `kill`, or a duration such as `"1m"` after which the session is killed unless another interactive client is attached by then.
+- Several clients can attach to one session. All receive output; interactive ones (the session's own key with `sessions:run`) may send stdin and signals; `readonly=true` only watches and needs just `sessions:read`.
+- **Closing stdin is an explicit message.** Closing the WebSocket is not the same as EOF on stdin.
+- Bad messages (unknown type, unknown field, binary frame, stdin after close) get a `protocol_error`; the connection stays open.
+- Flow control is WebSocket backpressure. Because output is on disk, a slow client cannot stall the process; it just falls behind and is served from the log. Stdin is written by a separate goroutine per connection, so a process that stops reading its input cannot block signals.
+- Browsers cannot set headers on WebSocket requests, so a key may also be offered as the subprotocol `shhttp.v2.auth.<key>` alongside `shhttp.v2.json`; the server never echoes it. The `Origin` header must match the request host or one of `allowed_origins`.
+- The server pings every 30 seconds and drops clients that do not answer.
+- Later: `resize` for TTY sessions, and a binary subprotocol (`shhttp.v2.binary`, one channel byte + payload) for high-throughput output without base64.
 
 ### Plain-HTTP equivalent of the WebSocket flow
 
@@ -290,12 +297,12 @@ Flags, each with an env var equivalent (`SHHTTP_<FLAG>`), plus an optional `--co
 
 ## Clients
 
-- **Go SDK** (`pkg/client`): sessions, events (as a Go iterator), stdin writer, jobs, templates, keys.
-- **CLI** (`cmd/shhttp`), built on the SDK, using `SHHTTP_URL` and `SHHTTP_KEY`:
-  - `shhttp run [-t] -- cmd args…` connects local stdin/stdout/stderr and the terminal to a remote session; exits with the remote exit code.
-  - `shhttp attach <id>`, `logs [-f] <id>`, `ps`, `kill <id>`, `signal <id> INT`
-  - `shhttp job submit|ls|get|cancel`, `shhttp template put|ls|run`
-  - `shhttp key create|ls|rotate|revoke` (with the master key)
+- **Go client library** (`pkg/client`): every HTTP endpoint, events as a Go iterator (`iter.Seq2`), stdin from any `io.Reader`, and WebSocket `Exec`/`Attach` connections. Server errors are `*api.Problem` values, WebSocket rejections `*client.ProtocolError`.
+- **CLI** (`cmd/shhttp`), built on the library, using `SHHTTP_URL`, `SHHTTP_KEY` and, for key commands, `SHHTTP_MASTER_KEY`:
+  - `shhttp run [flags] program args…` or `shhttp run -c 'command line'` runs over a WebSocket, streams local stdin (closing the remote stdin at local EOF; `-n` sends none), forwards Ctrl-C, SIGTERM and SIGHUP, and exits with the remote exit code (128 + signal number when a signal ended it). `-d` starts it in the background and prints the id. The session is killed if the client disconnects, unless `-on-disconnect` says otherwise.
+  - `shhttp attach [-from N] [-readonly] <id>`, `logs [-f] <id>`, `ps [-a]`, `get`, `kill`, `signal <id> INT`, `rm`
+  - `shhttp key create|ls|get|rotate|revoke`, `whoami`, `version`
+  - Later: `shhttp job …` and `shhttp template …` with phase 3; `-t` for TTY sessions with phase 4.
 - **API description**: the OpenAPI 3.1 document generated by huma (served at `/v2/openapi.json`, printed by `shhttpd openapi`, committed as `docs/openapi.yaml`) and a written spec for the WebSocket protocol, so clients in other languages can be generated or written quickly.
 - **Agents**: `?wait=true` with output caps covers simple tool calls. An MCP server mode (`shhttp mcp`) that exposes run/stdin/read/kill as tools is planned after v2.0.
 
@@ -305,7 +312,8 @@ Flags, each with an env var equivalent (`SHHTTP_<FLAG>`), plus an optional `--co
 cmd/shhttpd/          server entry point
 cmd/shhttp/           CLI client
 internal/server/      huma operations, auth middleware, error mapping, streaming
-internal/server/ws/   WebSocket protocol
+internal/cli/         the CLI's commands (cmd/shhttp is a thin wrapper)
+internal/testserver/  an in-process server for tests
 internal/auth/        master key, API keys, scopes, policy enforcement
 internal/session/     session manager, process runner (pipes + pty), lifecycle
 internal/eventlog/    append-only log, index, in-memory tail, subscribers
@@ -342,9 +350,13 @@ Dependencies kept small: `github.com/danielgtaylor/huma/v2`, `github.com/coder/w
 
 ## Implementation status
 
-Phase 1 is implemented: config (YAML, env, flags), SQLite store, master key and the keys API (create, list, get, update, rotate with grace, revoke with optional `kill_sessions`), scopes and key policies (enforced already, ahead of phase 4: `allow_shell`, `commands`, `cwd_roots`, `env_allow`, `max_timeout`, `max_concurrent_sessions`), the session engine, all session HTTP endpoints with NDJSON, SSE and raw streaming, `wait=true`, the retention sweeper, an audit log and graceful shutdown. The HTTP API runs on huma and publishes its OpenAPI document.
+Phases 1 and 2 are implemented.
 
-Not yet implemented from this document: WebSocket, `?lines=true`, TTY, `run_as`, `max_output_bytes` and `templates` policies, `on_disconnect`, jobs, queues, templates, metrics, client certificates, rate limiting, the CLI and SDK.
+Phase 1: config (YAML, env, flags), SQLite store, master key and the keys API (create, list, get, update, rotate with grace, revoke with optional `kill_sessions`), scopes and key policies (enforced already, ahead of phase 4: `allow_shell`, `commands`, `cwd_roots`, `env_allow`, `max_timeout`, `max_concurrent_sessions`), the session engine, all session HTTP endpoints with NDJSON, SSE and raw streaming, `wait=true`, the retention sweeper, an audit log and graceful shutdown. The HTTP API runs on huma and publishes its OpenAPI document.
+
+Phase 2: the WebSocket `exec` and `attach` endpoints with `on_disconnect`, browser authentication through the subprotocol and origin checks; the Go client library; the CLI.
+
+Not yet implemented from this document: `?lines=true`, TTY, `run_as`, `max_output_bytes` and `templates` policies, jobs, queues, templates, metrics, client certificates, rate limiting, the MCP mode.
 
 ## Decisions
 

@@ -80,3 +80,16 @@ func TestErrors(t *testing.T) {
 		t.Errorf("-h: %v", err)
 	}
 }
+
+func TestAllowedOrigins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	os.WriteFile(path, []byte("allowed_origins: [a.example, \"https://*.b.example\"]\n"), 0o600)
+	c, err := Load([]string{"--config", path}, env(nil))
+	if err != nil || len(c.AllowedOrigins) != 2 || c.AllowedOrigins[1] != "https://*.b.example" {
+		t.Fatalf("from file: %v, %v", c.AllowedOrigins, err)
+	}
+	c, err = Load(nil, env(map[string]string{"SHHTTP_ALLOWED_ORIGINS": "x.example, y.example"}))
+	if err != nil || len(c.AllowedOrigins) != 2 || c.AllowedOrigins[1] != "y.example" {
+		t.Fatalf("from env: %v, %v", c.AllowedOrigins, err)
+	}
+}

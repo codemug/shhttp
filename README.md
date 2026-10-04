@@ -2,7 +2,7 @@
 
 shhttp runs commands on the machine it is installed on and streams their output to any HTTP client. Clients can send stdin while the command runs, send signals, disconnect, and come back later to replay the output from any point.
 
-> **Status:** v2 is being rebuilt from scratch on the `v2` branch. The core (sessions, streaming, stdin, API keys) works today; WebSocket, jobs, templates, a CLI and terminal support are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. v1 has been removed; its last version is on the `master` branch.
+> **Status:** v2 is being rebuilt from scratch on the `v2` branch. Sessions, streaming over HTTP and WebSocket, stdin, API keys, a CLI and a Go client library work today; jobs, templates and terminal (TTY) support are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. v1 has been removed; its last version is on the `master` branch.
 
 ## Concepts
 
@@ -16,11 +16,35 @@ Requires Go 1.26 or newer.
 
 ```sh
 git clone -b v2 https://github.com/codemug/shhttp && cd shhttp
-go build -o shhttpd ./cmd/shhttpd
-./shhttpd                       # listens on 127.0.0.1:2112, stores data in ./shhttp-data
+go build -o shhttpd ./cmd/shhttpd     # the server
+go build -o shhttp ./cmd/shhttp       # the command-line client
+./shhttpd                             # listens on 127.0.0.1:2112, stores data in ./shhttp-data
 ```
 
-On first start the server generates a master key and writes it to `shhttp-data/master.key` (readable only by you). Use it to create an API key:
+On first start the server generates a master key and writes it to `shhttp-data/master.key` (readable only by you). The master key only creates and manages API keys; commands run with an API key.
+
+### With the CLI
+
+```sh
+export SHHTTP_URL=http://127.0.0.1:2112
+export SHHTTP_MASTER_KEY=$(cat shhttp-data/master.key)
+export SHHTTP_KEY=$(./shhttp key create -name me -scope sessions:run,sessions:read -q)
+
+./shhttp run uname -a
+printf 'c\na\nb\n' | ./shhttp run sort      # local stdin streams to the remote process
+./shhttp run python3 -i                      # interactive; Ctrl-C goes to python
+./shhttp run -c 'make test 2>&1 | tail'      # a command line, run with sh -c
+id=$(./shhttp run -d ./long-job.sh)          # start in the background, print the session id
+./shhttp logs -f "$id"                       # follow its output
+./shhttp attach "$id"                        # connect stdin and output to it
+./shhttp ps -a                               # list sessions
+```
+
+`shhttp run` exits with the remote exit code, or 128 plus the signal number when a signal ended the process, so it works in scripts. The remote process is killed if the client disconnects (`-on-disconnect keep` or a grace period such as `1m` changes that). Ctrl-C, SIGTERM and SIGHUP are forwarded to the remote process; Ctrl-\ quits the client. Run `shhttp -h` for every command.
+
+### With curl
+
+Create an API key with the master key:
 
 ```sh
 URL=http://127.0.0.1:2112
@@ -34,7 +58,7 @@ KEY="shh_…"
 AUTH="Authorization: Bearer $KEY"
 ```
 
-### Run a command and wait for the result
+#### Run a command and wait for the result
 
 ```sh
 curl -s -H "$AUTH" "$URL/v2/sessions?wait=true" --json '{"argv": ["uname", "-a"]}'
@@ -46,7 +70,7 @@ curl -s -H "$AUTH" "$URL/v2/sessions?wait=true" --json '{"argv": ["uname", "-a"]
 
 Use `"shell": "ls -l | wc -l"` instead of `argv` to run a command line with `sh -c`.
 
-### Stream output while it runs
+#### Stream output while it runs
 
 ```sh
 ID=$(curl -s -H "$AUTH" $URL/v2/sessions --json '{"shell": "for i in 1 2 3; do echo $i; sleep 1; done"}' | jq -r .id)
@@ -58,7 +82,7 @@ curl -sN -H "$AUTH" "$URL/v2/sessions/$ID/events?follow=true&format=sse"   # ser
 
 Add `from=<seq>` to resume after a disconnect. SSE clients resume automatically with `Last-Event-ID`.
 
-### Send stdin to a running process
+#### Send stdin to a running process
 
 ```sh
 ID=$(curl -s -H "$AUTH" $URL/v2/sessions --json '{"argv": ["python3", "-u", "-i"], "merge_stderr": true}' | jq -r .id)
@@ -107,10 +131,65 @@ All endpoints except `/healthz`, `/v2/version` and the API description need `Aut
 | `POST /v2/sessions/{id}/signal` | `sessions:run` | `{"signal": "SIGINT"}`, sent to the session's process group. |
 | `POST /v2/sessions/{id}/kill` | `sessions:run` | SIGTERM, then SIGKILL after the grace period. |
 | `DELETE /v2/sessions/{id}` | `sessions:run` | Kill if needed, then delete the session and its output. |
+| `GET /v2/exec` | `sessions:run` | WebSocket: start a session and exchange stdin, signals and events on one connection. |
+| `GET /v2/sessions/{id}/attach` | `sessions:read` | WebSocket: replay a session from `from`, then follow it. Sending input needs `sessions:run`; `readonly=true` only watches. |
 | `GET /v2/whoami` | any key | The calling key, its scopes and policy. |
 | `POST /v2/keys`, `GET /v2/keys`, `GET/PATCH/DELETE /v2/keys/{id}`, `POST /v2/keys/{id}/rotate` | master key | Manage API keys. `DELETE` revokes; add `?kill_sessions=true` to also kill the key's running sessions. `rotate` accepts `{"grace": "1h"}` to keep the old secret working for a while. |
 
 A key sees only its own sessions. The `admin:read` scope allows reading every key's sessions, but never changing them.
+
+### WebSocket
+
+Connect to `/v2/exec` offering the subprotocol `shhttp.v2.json`, then send a start message. Every message is JSON text:
+
+```jsonc
+→ {"type": "start", "spec": {"argv": ["python3", "-i"]}, "on_disconnect": "kill"}
+← {"type": "session", "session": {"id": "ses_…", "state": "running", …}}
+← {"seq": 1, "type": "started", "pid": 4242, …}
+→ {"type": "stdin", "data": "print(6 * 7)\n"}
+← {"seq": 2, "type": "stdout", "data": "42\n", …}
+→ {"type": "signal", "signal": "SIGINT"}
+→ {"type": "stdin_close"}
+← {"seq": 9, "type": "exit", "state": "exited", "exit_code": 0, …}
+   the server closes the connection with status 1000
+```
+
+- Events are the same objects as `GET /v2/sessions/{id}/events` returns. A rejected message gets `{"type": "protocol_error", "status": 400, "error": "…"}` and the connection stays open.
+- `on_disconnect`: `keep` (default), `kill`, or a duration such as `"1m"` after which the session is killed unless a client has attached again.
+- `/v2/sessions/{id}/attach?from=N` sends the same `session` message and then the events from `N`, so a client can reconnect without missing output.
+- Browsers cannot set an Authorization header on WebSocket requests: offer the key as a second subprotocol, `shhttp.v2.auth.<key>`. Pages from other origins are refused unless listed in `allowed_origins`.
+
+### Go client
+
+```go
+import (
+	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/pkg/client"
+)
+
+c := client.New("http://127.0.0.1:2112", os.Getenv("SHHTTP_KEY"))
+
+// Run and wait.
+res, err := c.Run(ctx, api.SessionSpec{Argv: []string{"uname", "-a"}}, nil)
+fmt.Print(*res.Stdout)
+
+// Interactive, over a WebSocket.
+conn, err := c.Exec(ctx, api.SessionSpec{Argv: []string{"cat"}}, nil)
+conn.Stdin(ctx, []byte("hello\n"))
+conn.CloseStdin(ctx)
+for {
+	e, err := conn.Recv(ctx) // io.EOF after the exit event
+	if err != nil {
+		break
+	}
+	os.Stdout.Write(e.Data)
+}
+
+// Follow a session's events over HTTP.
+for e, err := range c.Events(ctx, id, &client.EventsOptions{Follow: true}) { … }
+```
+
+Errors from the server are `*api.Problem` values (`client.IsStatus(err, 404)`); rejected WebSocket messages are `*client.ProtocolError`.
 
 ### Session spec
 
@@ -174,6 +253,7 @@ max_sessions: 100                          # 0 = unlimited
 sweep_interval: 1m
 log_format: json                           # text or json
 log_level: info
+allowed_origins: [app.example.com]         # web pages allowed to open WebSockets
 ```
 
 The master key can also be given with `SHHTTP_MASTER_KEY`. `shhttpd keygen` prints a new one. The server warns when it listens on a non-loopback address without TLS.
@@ -185,6 +265,8 @@ docker build -t shhttp .
 docker run -p 2112:2112 -v shhttp-data:/data shhttp
 docker run --rm -v shhttp-data:/data alpine cat /data/master.key
 ```
+
+The image also contains the `shhttp` client.
 
 ## Development
 

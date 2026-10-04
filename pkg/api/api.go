@@ -375,3 +375,57 @@ type StdinResponse struct {
 type Version struct {
 	Version string `json:"version"`
 }
+
+// WebSocket protocol. Clients connect to /v2/exec (start a session) or
+// /v2/sessions/{id}/attach and exchange JSON text messages.
+const (
+	// WSSubprotocol must be offered by clients.
+	WSSubprotocol = "shhttp.v2.json"
+	// WSAuthSubprotocolPrefix carries the key for clients that cannot set
+	// an Authorization header (browsers): offer WSAuthSubprotocolPrefix+key
+	// alongside WSSubprotocol. The server never echoes it back.
+	WSAuthSubprotocolPrefix = "shhttp.v2.auth."
+)
+
+// Client message types.
+const (
+	MsgStart      = "start"
+	MsgStdin      = "stdin"
+	MsgStdinClose = "stdin_close"
+	MsgSignal     = "signal"
+)
+
+// ClientMessage is a message from a WebSocket client.
+type ClientMessage struct {
+	Type string `json:"type"`
+	// start (only on /v2/exec, and only as the first message)
+	Spec *SessionSpec `json:"spec,omitempty"`
+	// OnDisconnect says what happens to the session when this connection
+	// closes: "keep" (the default), "kill", or a duration such as "1m"
+	// after which the session is killed unless a client has attached.
+	OnDisconnect string `json:"on_disconnect,omitempty"`
+	// stdin
+	Data    string `json:"data,omitempty"`
+	DataB64 []byte `json:"data_b64,omitempty"`
+	// signal
+	Signal string `json:"signal,omitempty"`
+}
+
+// Server message types besides the session event types.
+const (
+	// MsgSession is sent first on every connection and describes the session.
+	MsgSession = "session"
+	// MsgProtocolError reports a rejected message or a session that could
+	// not be started. Status is the HTTP status the same failure gets over
+	// HTTP.
+	MsgProtocolError = "protocol_error"
+)
+
+// ServerMessage is a WebSocket server message that is not a session event.
+// Every other server message is an Event.
+type ServerMessage struct {
+	Type    string   `json:"type"`
+	Session *Session `json:"session,omitempty"`
+	Error   string   `json:"error,omitempty"`
+	Status  int      `json:"status,omitempty"`
+}

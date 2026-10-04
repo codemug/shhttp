@@ -128,7 +128,7 @@ func run(cfg config.Config) error {
 	defer cancelBase()
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(authn, sessions, logger, version).Handler(),
+		Handler:           server.New(authn, sessions, logger, server.Options{Version: version, AllowedOrigins: cfg.AllowedOrigins}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },

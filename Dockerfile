@@ -4,12 +4,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/shhttpd ./cmd/shhttpd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ ./cmd/shhttpd ./cmd/shhttp
 
 # Alpine rather than distroless: sessions need a shell and basic tools.
 FROM alpine:3
 RUN adduser -D -u 10001 shhttp && mkdir /data && chown shhttp /data
-COPY --from=build /out/shhttpd /usr/local/bin/shhttpd
+COPY --from=build /out/shhttpd /out/shhttp /usr/local/bin/
 USER shhttp
 ENV SHHTTP_LISTEN=0.0.0.0:2112 SHHTTP_DATA_DIR=/data
 VOLUME /data

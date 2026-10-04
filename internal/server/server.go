@@ -39,18 +39,31 @@ const (
 	DocsPath    = "/v2/docs"
 )
 
+// Options configures a Server.
+type Options struct {
+	// Version is the server version reported by /v2/version.
+	Version string
+	// AllowedOrigins are host patterns (such as "app.example.com" or
+	// "https://*.example.com") of web pages allowed to open WebSocket
+	// connections. Same-origin pages and non-browser clients are always
+	// allowed.
+	AllowedOrigins []string
+}
+
 // Server serves the v2 API.
 type Server struct {
 	auth     *auth.Authenticator
 	sessions *session.Manager
 	log      *slog.Logger
+	opts     Options
 	mux      *http.ServeMux
 	api      huma.API
+	attached *attachments
 }
 
 // New returns a Server.
-func New(a *auth.Authenticator, m *session.Manager, logger *slog.Logger, version string) *Server {
-	s := &Server{auth: a, sessions: m, log: logger, mux: http.NewServeMux()}
+func New(a *auth.Authenticator, m *session.Manager, logger *slog.Logger, opts Options) *Server {
+	s := &Server{auth: a, sessions: m, log: logger, opts: opts, mux: http.NewServeMux(), attached: newAttachments()}
 
 	config := huma.DefaultConfig("shhttp", APIVersion)
 	config.Info.Description = "Run commands remotely, stream their output and send them input. " +
@@ -72,15 +85,16 @@ func New(a *auth.Authenticator, m *session.Manager, logger *slog.Logger, version
 
 	s.api = humago.New(s.mux, config)
 	s.api.UseMiddleware(s.authenticate)
-	s.registerMeta(version)
+	s.registerMeta(opts.Version)
 	s.registerKeys()
 	s.registerSessions()
+	s.registerWebSocket()
 	return s
 }
 
 // OpenAPIYAML returns the OpenAPI document without starting a server.
 func OpenAPIYAML() ([]byte, error) {
-	return New(nil, nil, slog.New(slog.DiscardHandler), "").api.OpenAPI().YAML()
+	return New(nil, nil, slog.New(slog.DiscardHandler), Options{}).api.OpenAPI().YAML()
 }
 
 // Handler returns the HTTP handler with logging, panic recovery and
@@ -165,9 +179,10 @@ func writeProblem(w http.ResponseWriter, status int, detail string) {
 // access is the credential an operation requires. It is stored in the
 // operation's metadata and checked by authenticate.
 type access struct {
-	public bool   // no credential
-	master bool   // the master key
-	scope  string // an API key holding this scope; "" means any credential
+	public    bool   // no credential
+	master    bool   // the master key
+	scope     string // an API key holding this scope; "" means any credential
+	websocket bool   // the key may also arrive as a WebSocket subprotocol
 }
 
 const accessKey = "access"
@@ -205,6 +220,9 @@ func (s *Server) authenticate(ctx huma.Context, next func(huma.Context)) {
 		return
 	}
 	token, ok := strings.CutPrefix(ctx.Header("Authorization"), "Bearer ")
+	if !ok && a.websocket {
+		token, ok = subprotocolKey(ctx.Header("Sec-WebSocket-Protocol"))
+	}
 	if !ok || strings.TrimSpace(token) == "" {
 		ctx.SetHeader("WWW-Authenticate", `Bearer realm="shhttp"`)
 		huma.WriteErr(s.api, ctx, http.StatusUnauthorized, "an Authorization: Bearer <key> header is required")
@@ -233,6 +251,17 @@ func (s *Server) authenticate(ctx huma.Context, next func(huma.Context)) {
 		return
 	}
 	next(huma.WithValue(ctx, principalKey{}, p))
+}
+
+// subprotocolKey finds a key offered as a WebSocket subprotocol, which is how
+// browsers, unable to set headers on WebSocket requests, authenticate.
+func subprotocolKey(header string) (string, bool) {
+	for _, p := range strings.Split(header, ",") {
+		if key, ok := strings.CutPrefix(strings.TrimSpace(p), api.WSAuthSubprotocolPrefix); ok {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 type healthOutput struct {

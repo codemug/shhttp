@@ -30,6 +30,7 @@ type Config struct {
 	SweepInterval    time.Duration `yaml:"sweep_interval"`
 	LogFormat        string        `yaml:"log_format"`
 	LogLevel         string        `yaml:"log_level"`
+	AllowedOrigins   []string      `yaml:"allowed_origins"`
 
 	// configFile is only settable by flag or environment variable.
 	configFile string
@@ -64,6 +65,15 @@ func newFlagSet(c *Config) *flag.FlagSet {
 	fs.DurationVar(&c.SweepInterval, "sweep-interval", c.SweepInterval, "how often expired sessions are deleted")
 	fs.StringVar(&c.LogFormat, "log-format", c.LogFormat, "log format: text or json")
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "log level: debug, info, warn or error")
+	fs.Func("allowed-origins", "comma-separated host patterns of web pages allowed to open WebSocket connections, e.g. app.example.com,*.corp.example", func(v string) error {
+		c.AllowedOrigins = nil
+		for _, o := range strings.Split(v, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				c.AllowedOrigins = append(c.AllowedOrigins, o)
+			}
+		}
+		return nil
+	})
 	return fs
 }
 
