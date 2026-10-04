@@ -2,7 +2,7 @@
 
 shhttp runs commands on the machine it is installed on and streams their output to any HTTP client. Clients can send stdin while the command runs, send signals, disconnect, and come back later to replay the output from any point.
 
-> **Status:** v2 is being rebuilt from scratch on the `v2` branch. The core (sessions, streaming, stdin, API keys) works today; WebSocket, jobs, templates, a CLI and terminal support are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. The v1 code in `pkg/` and `cmd/shhttp/` is obsolete and will be removed.
+> **Status:** v2 is being rebuilt from scratch on the `v2` branch. The core (sessions, streaming, stdin, API keys) works today; WebSocket, jobs, templates, a CLI and terminal support are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. v1 has been removed; its last version is on the `master` branch.
 
 ## Concepts
 
@@ -189,7 +189,7 @@ docker run --rm -v shhttp-data:/data alpine cat /data/master.key
 ## Development
 
 ```sh
-go test -race ./internal/... ./pkg/api/...
+go test -race ./...
 ```
 
 `docs/openapi.yaml` must match the code; a test fails when it does not. After changing an endpoint or an API type, regenerate it:
