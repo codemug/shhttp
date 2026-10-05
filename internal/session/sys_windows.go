@@ -1,8 +1,10 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 )
@@ -18,7 +20,23 @@ func shellCommand(command string) (path string, args []string) {
 	return comspec, []string{"cmd", "/C", command}
 }
 
-func sysProcAttr() *syscall.SysProcAttr { return nil }
+type credential struct{}
+
+func sysProcAttr(tty bool, cred *credential) *syscall.SysProcAttr { return nil }
+
+func startPTY(cmd *exec.Cmd, attrs *syscall.SysProcAttr, cols, rows uint16) (*os.File, error) {
+	return nil, errors.New("TTY sessions are not supported on Windows")
+}
+
+func resizePTY(f *os.File, cols, rows uint16) error {
+	return errors.New("TTY sessions are not supported on Windows")
+}
+
+func lookupRunAs(spec string) (*credential, map[string]string, error) {
+	return nil, nil, errors.New("run_as is not supported on Windows")
+}
+
+func reapOrphans(sessionIDs []string) int { return 0 }
 
 func kill(pid int) error {
 	p, err := os.FindProcess(pid)

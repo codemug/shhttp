@@ -5,6 +5,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +26,7 @@ type Config struct {
 	MasterKeyFile    string        `yaml:"master_key_file"`
 	TLSCert          string        `yaml:"tls_cert"`
 	TLSKey           string        `yaml:"tls_key"`
+	ClientCA         string        `yaml:"client_ca"`
 	DefaultRetention time.Duration `yaml:"default_retention"`
 	KillGrace        time.Duration `yaml:"kill_grace"`
 	MaxSessions      int           `yaml:"max_sessions"`
@@ -31,6 +34,9 @@ type Config struct {
 	LogFormat        string        `yaml:"log_format"`
 	LogLevel         string        `yaml:"log_level"`
 	AllowedOrigins   []string      `yaml:"allowed_origins"`
+	MaxOutputBytes   int64         `yaml:"max_output_bytes"`
+	RunAs            string        `yaml:"run_as"`
+	AuthFailureLimit int           `yaml:"auth_failure_limit"`
 
 	// configFile is only settable by flag or environment variable.
 	configFile string
@@ -46,6 +52,7 @@ func Defaults() Config {
 		SweepInterval:    time.Minute,
 		LogFormat:        "text",
 		LogLevel:         "info",
+		AuthFailureLimit: 20,
 	}
 }
 
@@ -59,12 +66,16 @@ func newFlagSet(c *Config) *flag.FlagSet {
 	fs.StringVar(&c.MasterKeyFile, "master-key-file", c.MasterKeyFile, "file holding the master key (default <data-dir>/master.key; SHHTTP_MASTER_KEY takes precedence)")
 	fs.StringVar(&c.TLSCert, "tls-cert", c.TLSCert, "TLS certificate file")
 	fs.StringVar(&c.TLSKey, "tls-key", c.TLSKey, "TLS private key file")
+	fs.StringVar(&c.ClientCA, "client-ca", c.ClientCA, "PEM file of CAs; when set, clients must present a certificate signed by one of them")
 	fs.DurationVar(&c.DefaultRetention, "default-retention", c.DefaultRetention, "how long finished sessions are kept when they set no retention")
 	fs.DurationVar(&c.KillGrace, "kill-grace", c.KillGrace, "time between SIGTERM and SIGKILL when stopping a session")
 	fs.IntVar(&c.MaxSessions, "max-sessions", c.MaxSessions, "maximum number of running sessions (0 = unlimited)")
 	fs.DurationVar(&c.SweepInterval, "sweep-interval", c.SweepInterval, "how often expired sessions are deleted")
 	fs.StringVar(&c.LogFormat, "log-format", c.LogFormat, "log format: text or json")
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "log level: debug, info, warn or error")
+	fs.IntVar(&c.AuthFailureLimit, "auth-failure-limit", c.AuthFailureLimit, "refuse an IP for a minute after this many failed authentications in a minute (0 = no limit)")
+	fs.Int64Var(&c.MaxOutputBytes, "max-output-bytes", c.MaxOutputBytes, "kill sessions whose output exceeds this many bytes (0 = unlimited)")
+	fs.StringVar(&c.RunAs, "run-as", c.RunAs, "run sessions as this OS user (user, user:group or uid:gid) unless a key's policy says otherwise; needs root")
 	fs.Func("allowed-origins", "comma-separated host patterns of web pages allowed to open WebSocket connections, e.g. app.example.com,*.corp.example", func(v string) error {
 		c.AllowedOrigins = nil
 		for _, o := range strings.Split(v, ",") {
@@ -147,10 +158,14 @@ func (c *Config) validate() error {
 		return errors.New("data_dir must not be empty")
 	case (c.TLSCert == "") != (c.TLSKey == ""):
 		return errors.New("tls_cert and tls_key must be set together")
+	case c.ClientCA != "" && c.TLSCert == "":
+		return errors.New("client_ca needs tls_cert and tls_key")
 	case c.DefaultRetention <= 0 || c.KillGrace <= 0 || c.SweepInterval <= 0:
 		return errors.New("default_retention, kill_grace and sweep_interval must be positive")
 	case c.MaxSessions < 0:
 		return errors.New("max_sessions must not be negative")
+	case c.MaxOutputBytes < 0:
+		return errors.New("max_output_bytes must not be negative")
 	case c.LogFormat != "text" && c.LogFormat != "json":
 		return fmt.Errorf("log_format must be text or json, not %q", c.LogFormat)
 	}
@@ -169,4 +184,30 @@ func Usage(output io.Writer) {
 	fs.SetOutput(output)
 	fmt.Fprintf(output, "Usage: shhttpd [flags]\n       shhttpd keygen    print a new random master key\n       shhttpd version\n       shhttpd openapi   print the OpenAPI document (YAML)\n\nEvery flag can also be set with an environment variable, e.g. --data-dir as %s.\n\nFlags:\n", EnvName("data-dir"))
 	fs.PrintDefaults()
+}
+
+// TLSConfig returns the server's TLS configuration, or nil without TLS.
+// With ClientCA, clients must present a certificate signed by it.
+func (c Config) TLSConfig() (*tls.Config, error) {
+	if c.TLSCert == "" {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
+	if err != nil {
+		return nil, fmt.Errorf("loading TLS certificate: %w", err)
+	}
+	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if c.ClientCA != "" {
+		pem, err := os.ReadFile(c.ClientCA)
+		if err != nil {
+			return nil, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("%s contains no PEM certificates", c.ClientCA)
+		}
+		cfg.ClientCAs = pool
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return cfg, nil
 }

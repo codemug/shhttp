@@ -212,3 +212,8 @@ func (c *Conn) Close() {
 		c.ws.CloseNow()
 	}
 }
+
+// Resize changes the terminal size of a TTY session.
+func (c *Conn) Resize(ctx context.Context, cols, rows uint16) error {
+	return c.send(ctx, api.ClientMessage{Type: api.MsgResize, Cols: cols, Rows: rows})
+}

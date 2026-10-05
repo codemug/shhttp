@@ -41,6 +41,9 @@ func Validate(p api.Policy) error {
 	if p.MaxConcurrentSessions < 0 {
 		return fmt.Errorf("policy.max_concurrent_sessions must not be negative")
 	}
+	if p.MaxOutputBytes < 0 {
+		return fmt.Errorf("policy.max_output_bytes must not be negative")
+	}
 	return nil
 }
 
@@ -62,6 +65,7 @@ func matchAny(patterns []string, s string) bool {
 // to an absolute path and the working directory has been defaulted.
 type Request struct {
 	Shell   bool
+	TTY     bool
 	Path    string // absolute program path; for shell sessions, the shell
 	Cwd     string // absolute; empty means the server's working directory
 	EnvKeys []string
@@ -81,6 +85,9 @@ func DefaultCwd(p api.Policy) string {
 func Check(p api.Policy, r Request, evalSymlinks func(string) (string, error)) (time.Duration, error) {
 	if r.Shell && !p.ShellAllowed() {
 		return 0, denied("shell sessions are not allowed")
+	}
+	if r.TTY && !p.TTYAllowed() {
+		return 0, denied("TTY sessions are not allowed")
 	}
 	if !r.Shell && len(p.Commands) > 0 && !matchAny(p.Commands, r.Path) {
 		return 0, denied("command %q is not in the allowed list", r.Path)

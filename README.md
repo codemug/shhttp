@@ -40,7 +40,7 @@ id=$(./shhttp run -d ./long-job.sh)          # start in the background, print th
 ./shhttp ps -a                               # list sessions
 ```
 
-`shhttp run` exits with the remote exit code, or 128 plus the signal number when a signal ended the process, so it works in scripts. The remote process is killed if the client disconnects (`-on-disconnect keep` or a grace period such as `1m` changes that). Ctrl-C, SIGTERM and SIGHUP are forwarded to the remote process; Ctrl-\ quits the client. Run `shhttp -h` for every command.
+`shhttp run -t` runs on a terminal (for editors, REPLs with line editing, password prompts): the local terminal switches to raw mode and window resizes are forwarded. `shhttp run` exits with the remote exit code, or 128 plus the signal number when a signal ended the process, so it works in scripts. The remote process is killed if the client disconnects (`-on-disconnect keep` or a grace period such as `1m` changes that). Ctrl-C, SIGTERM and SIGHUP are forwarded to the remote process; Ctrl-\ quits the client. Run `shhttp -h` for every command.
 
 ### With curl
 
@@ -126,10 +126,11 @@ All endpoints except `/healthz`, `/v2/version` and the API description need `Aut
 | `POST /v2/sessions` | `sessions:run` | Start a session. `?wait=true` waits and returns the output (`wait_timeout`, `max_output`, `keep=head\|tail`). |
 | `GET /v2/sessions` | `sessions:read` | List your sessions, newest first (`state`, `label=k=v`, `limit`, `cursor`). |
 | `GET /v2/sessions/{id}` | `sessions:read` | Session state and exit information. |
-| `GET /v2/sessions/{id}/events` | `sessions:read` | Events (`from`, `follow`, `format=ndjson\|sse\|raw`, `stream=stdout\|stderr` for raw). |
+| `GET /v2/sessions/{id}/events` | `sessions:read` | Events (`from`, `follow`, `format=ndjson\|sse\|raw`, `stream=stdout\|stderr` for raw, `lines=true` for one event per line). |
 | `POST /v2/sessions/{id}/stdin` | `sessions:run` | Write the request body to stdin (`close=true` to close it afterwards). |
 | `POST /v2/sessions/{id}/signal` | `sessions:run` | `{"signal": "SIGINT"}`, sent to the session's process group. |
 | `POST /v2/sessions/{id}/kill` | `sessions:run` | SIGTERM, then SIGKILL after the grace period. |
+| `POST /v2/sessions/{id}/resize` | `sessions:run` | `{"cols": 120, "rows": 40}` for TTY sessions. |
 | `DELETE /v2/sessions/{id}` | `sessions:run` | Kill if needed, then delete the session and its output. |
 | `GET /v2/exec` | `sessions:run` | WebSocket: start a session and exchange stdin, signals and events on one connection. |
 | `GET /v2/sessions/{id}/attach` | `sessions:read` | WebSocket: replay a session from `from`, then follow it. Sending input needs `sessions:run`; `readonly=true` only watches. |
@@ -142,6 +143,7 @@ All endpoints except `/healthz`, `/v2/version` and the API description need `Aut
 | `PUT /v2/templates/{name}`, `DELETE /v2/templates/{name}` | `templates:write` | Save or delete a template. |
 | `POST /v2/templates/{name}/run` | `templates:run` | `{"params": {…}}` starts the template's session or job. |
 | `GET /v2/whoami` | any key | The calling key, its scopes and policy. |
+| `GET /metrics` | `admin:read` | Prometheus metrics: requests, sessions, jobs, output bytes, auth failures. |
 | `POST /v2/keys`, `GET /v2/keys`, `GET/PATCH/DELETE /v2/keys/{id}`, `POST /v2/keys/{id}/rotate` | master key | Manage API keys. `DELETE` revokes; add `?kill_sessions=true` to also kill the key's running sessions. `rotate` accepts `{"grace": "1h"}` to keep the old secret working for a while. |
 
 A key sees only its own sessions. The `admin:read` scope allows reading every key's sessions, but never changing them.
@@ -267,9 +269,12 @@ POST /v2/templates/deploy/run   {"params": {"branch": "release/2"}}
   "merge_stderr": false,              // one stream, original ordering preserved
   "timeout": "10m",
   "retention": "24h",                 // keep the record and output this long after exit
+  "tty": {"cols": 120, "rows": 40},   // run on a pseudo-terminal; output (stderr included) is stdout
   "labels": {"team": "infra"}
 }
 ```
+
+Every session's environment contains `SHHTTP_SESSION_ID`. In a TTY session, closing stdin sends end-of-file (Ctrl-D) to the terminal.
 
 Output events carry `data` when the bytes are valid UTF-8 and `data_b64` otherwise.
 
@@ -288,7 +293,10 @@ POST /v2/keys
     "env_allow": ["CI_.*"],
     "max_timeout": "30m",
     "max_concurrent_sessions": 4,
-    "templates": ["deploy"]                 // with templates:run: only these templates
+    "templates": ["deploy"],                // with templates:run: only these templates
+    "allow_tty": true,
+    "run_as": "builder",                    // run sessions as this OS user (server must be root)
+    "max_output_bytes": 10485760            // kill sessions with more output
   }
 }
 ```
@@ -297,8 +305,10 @@ POST /v2/keys
 
 shhttp exists to run commands, so treat access to it like shell access.
 
-- Keep the default loopback address, or use TLS when listening on a network.
-- **Sessions run as the same OS user as the server.** A key that can run any program can read the server's data directory, including the master key file and other keys' output. Until per-session users (`run_as`) arrive, give untrusted clients only keys with `"allow_shell": false` and a strict `commands` list, and run the server as a dedicated, unprivileged user.
+- Keep the default loopback address, or use TLS when listening on a network. With `client_ca`, clients also need a certificate signed by your CA (the CLI reads `SHHTTP_CA_CERT`, `SHHTTP_CLIENT_CERT` and `SHHTTP_CLIENT_KEY`).
+- **Without `run_as`, sessions run as the same OS user as the server**, so a key that can run any program can read the server's data directory, including the master key file and other keys' output. Run the server as root with `run_as` set to an unprivileged user (in the config or per key), or give untrusted clients only keys with `"allow_shell": false` and a strict `commands` list.
+- `max_output_bytes` (config or per key) kills sessions that produce too much output; `auth_failure_limit` refuses an IP for a minute after repeated failed authentications.
+- After a crash, the server kills on restart any process left over from a lost session (Linux; processes are recognized by their `SHHTTP_SESSION_ID` environment variable).
 - Prefer `SHHTTP_MASTER_KEY` or a `master_key_file` outside the data directory, so the key is not stored next to the data.
 
 ## Configuration
@@ -318,6 +328,10 @@ sweep_interval: 1m
 log_format: json                           # text or json
 log_level: info
 allowed_origins: [app.example.com]         # web pages allowed to open WebSockets
+client_ca: /etc/shhttp/clients-ca.pem      # require client certificates signed by this CA
+run_as: shhttp-sessions                    # run sessions as this user (needs root)
+max_output_bytes: 104857600                # kill sessions with more output (0 = unlimited)
+auth_failure_limit: 20                     # failed authentications per IP per minute (0 = unlimited)
 ```
 
 The master key can also be given with `SHHTTP_MASTER_KEY`. `shhttpd keygen` prints a new one. The server warns when it listens on a non-loopback address without TLS.

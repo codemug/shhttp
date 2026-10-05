@@ -53,7 +53,7 @@ The HTTP layer is built with [huma](https://github.com/danielgtaylor/huma) on th
 | | `GET /v2/sessions/{id}/events` | Output and state events. `?from=<seq>&follow=true`. Format chosen by `Accept`. |
 | | `POST /v2/sessions/{id}/stdin` | Write the request body (streamed) to stdin. `?close=true` closes stdin afterwards. |
 | | `POST /v2/sessions/{id}/signal` | `{"signal":"SIGINT"}` |
-| | `POST /v2/sessions/{id}/resize` | `{"cols":120,"rows":40}` (TTY sessions only). |
+| | `POST /v2/sessions/{id}/resize` | `{"cols":120,"rows":40}` (TTY sessions only; 409 otherwise). |
 | | `POST /v2/sessions/{id}/kill` | SIGTERM, then SIGKILL after the grace period. The record and output are kept. |
 | | `DELETE /v2/sessions/{id}` | Kill if running, then delete the record and its log. |
 | | `GET /v2/sessions/{id}/attach` | WebSocket: attach to an existing session. |
@@ -67,7 +67,7 @@ The HTTP layer is built with [huma](https://github.com/danielgtaylor/huma) on th
 | Keys | `POST/GET /v2/keys`, `GET/PATCH/DELETE /v2/keys/{id}` | API key management (master key only). |
 | | `POST /v2/keys/{id}/rotate` | Issue a new secret, optionally keeping the old one valid for a grace period. |
 | | `GET /v2/whoami` | The calling key's id, name, scopes and policy. |
-| Ops | `GET /healthz`, `GET /v2/version`, `GET /metrics` | Health (no auth), version, Prometheus metrics. |
+| Ops | `GET /healthz`, `GET /v2/version`, `GET /metrics` | Health and version (no auth), Prometheus metrics (`admin:read`). |
 
 ### Session spec
 
@@ -102,7 +102,7 @@ Every session event has a global, gap-free sequence number:
 {"seq":5, "time":"…", "type":"exit", "exit_code":0, "signal":null, "duration_ms":812}
 ```
 
-- Output is sent as **chunks**, not lines: programs print partial lines, progress bars, binary data and terminal escape codes. A later `?lines=true` option will make the server buffer output into complete lines for clients that want them. A UTF-8 character split across two reads is held back and sent whole.
+- Output is sent as **chunks**, not lines: programs print partial lines, progress bars, binary data and terminal escape codes. `?lines=true` makes the server re-chunk output into one event per complete line for clients that want lines. A UTF-8 character split across two reads is held back and sent whole.
 - A client resumes with `?from=<last seq + 1>` (or `Last-Event-ID` for SSE).
 - A subscriber that falls too far behind the in-memory buffer is served from the disk log transparently; it never misses events.
 
@@ -147,7 +147,8 @@ Server → client:
 - Flow control is WebSocket backpressure. Because output is on disk, a slow client cannot stall the process; it just falls behind and is served from the log. Stdin is written by a separate goroutine per connection, so a process that stops reading its input cannot block signals.
 - Browsers cannot set headers on WebSocket requests, so a key may also be offered as the subprotocol `shhttp.v2.auth.<key>` alongside `shhttp.v2.json`; the server never echoes it. The `Origin` header must match the request host or one of `allowed_origins`.
 - The server pings every 30 seconds and drops clients that do not answer.
-- Later: `resize` for TTY sessions, and a binary subprotocol (`shhttp.v2.binary`, one channel byte + payload) for high-throughput output without base64.
+- `{"type":"resize","cols":120,"rows":40}` resizes a TTY session.
+- Later: a binary subprotocol (`shhttp.v2.binary`, one channel byte + payload) for high-throughput output without base64.
 
 ### Plain-HTTP equivalent of the WebSocket flow
 
@@ -217,15 +218,17 @@ A policy is enforced when a session starts, after template parameters are filled
 
 - `commands` matches against the **resolved absolute path** of `argv[0]` (so `PATH` tricks don't bypass it).
 - `allow_shell: false` is needed for `commands` to mean anything: with shell access a client can run any program, so the docs and `whoami` say so explicitly.
-- `cwd_roots`, `env_allow`, `tty`, `max_timeout`, `max_concurrent_sessions`, `max_output_bytes`.
-- Optional `run_as` (user/group) when the server runs as root.
+- `cwd_roots`, `env_allow`, `allow_tty`, `max_timeout`, `max_concurrent_sessions`.
+- `max_output_bytes`: a session whose stdout and stderr together exceed it is killed (state `killed`, `error` says why, and the exit event carries the error). The server-wide `max_output_bytes` applies too; the lower limit wins.
+- `run_as` (`user`, `user:group` or numeric ids) runs the key's sessions as that OS user, with `HOME`, `USER` and `LOGNAME` set for it. The server must run as root; the server-wide `run_as` is the default for keys without one.
 - `templates` (list of names) for keys with only `templates:run`.
 
 ### Other protections
 
 - Default listen address `127.0.0.1:2112`. Listening on another address prints a warning unless TLS is configured (`--tls-cert/--tls-key`, optional client-certificate auth).
 - WebSocket `Origin` header checked against `--allowed-origins` (empty by default, so browsers on other sites cannot open connections to the server: cross-site WebSocket hijacking).
-- Failed-auth rate limiting per client IP.
+- Failed-auth rate limiting per client IP: after `auth_failure_limit` (default 20) failures within a minute, the IP gets 429 for the rest of that minute, even with a valid key.
+- Client certificates: with `client_ca`, the TLS server requires and verifies a client certificate signed by that CA, in addition to the bearer key.
 - Audit log (`slog`, JSON) for key management, session start (key, argv, cwd), signals and exits. Stdin and output are never logged.
 
 ## Jobs, queues and templates
@@ -350,21 +353,24 @@ Dependencies kept small: `github.com/danielgtaylor/huma/v2`, `github.com/coder/w
 
 ## Known limitations
 
-- **Sessions run as the server's OS user.** A key that may run arbitrary programs can therefore read everything that user can: the data directory (including `master.key` and other keys' session logs) and, through `/proc`, the server's original environment. Policies limit which programs run, not which files those programs read. Until `run_as` (phase 4) runs sessions as a separate, unprivileged user, treat any key without a strict `commands` policy and `allow_shell: false` as equivalent to the master key. The server already removes `SHHTTP_MASTER_KEY` from the environment sessions inherit.
-- **Processes can outlive a server crash.** After `kill -9` or a crash, Linux kills the session's own process, but processes it started (for example the `sleep` in `sh -c "sleep 60; true"`) keep running, and on macOS nothing is killed. The session is still marked `lost` on restart. Phase 4 will put each session in its own cgroup on Linux so the whole tree can be killed, including on restart.
+- **Without `run_as`, sessions run as the server's OS user.** A key that may run arbitrary programs can then read everything that user can: the data directory (including `master.key` and other keys' session logs) and, through `/proc`, the server's original environment. Policies limit which programs run, not which files they read. Run the server as root with `run_as` set to an unprivileged user (server-wide or per key), or treat any key without a strict `commands` policy and `allow_shell: false` as equivalent to the master key. The server removes `SHHTTP_MASTER_KEY` from the environment sessions inherit.
+- **Processes can outlive a server crash until it restarts.** After `kill -9` or a crash, Linux kills each session's own process (`Pdeathsig`), and on restart the server kills every remaining process whose environment carries the `SHHTTP_SESSION_ID` of a lost session. A process that clears its environment, or runs as a user the server cannot signal, escapes this. On macOS only the restart cleanup is missing; a cgroup-based approach could replace both on Linux later.
+- TTY sessions on Windows are not supported (no ConPTY yet); nor are `run_as` and process-tree signals there.
 - A stdin write that the process never reads blocks other stdin writes to the same session until the process reads, exits or is killed.
 
 ## Implementation status
 
-Phases 1, 2 and 3 are implemented.
+Phases 1 to 4 are implemented.
 
 Phase 1: config (YAML, env, flags), SQLite store, master key and the keys API (create, list, get, update, rotate with grace, revoke with optional `kill_sessions`), scopes and key policies (enforced already, ahead of phase 4: `allow_shell`, `commands`, `cwd_roots`, `env_allow`, `max_timeout`, `max_concurrent_sessions`), the session engine, all session HTTP endpoints with NDJSON, SSE and raw streaming, `wait=true`, the retention sweeper, an audit log and graceful shutdown. The HTTP API runs on huma and publishes its OpenAPI document.
+
+Phase 4: TTY sessions (pseudo-terminal, resize over HTTP and WebSocket, `shhttp run -t` in raw mode), policies `allow_tty`, `run_as` and `max_output_bytes` with server-wide defaults, orphan cleanup after a crash, Prometheus metrics at `/metrics` (scope `admin:read`), client certificates, failed-auth rate limiting, and `?lines=true`.
 
 Phase 3: jobs (sequential or dependency graph, `allow_failure`, cancel, `on_restart`), job events, queues, templates with typed parameters, and their client and CLI commands.
 
 Phase 2: the WebSocket `exec` and `attach` endpoints with `on_disconnect`, browser authentication through the subprotocol and origin checks; the Go client library; the CLI.
 
-Not yet implemented from this document: `?lines=true`, TTY, `run_as` and `max_output_bytes` policies, metrics, client certificates, rate limiting, the MCP mode.
+Not yet implemented from this document: the MCP mode (phase 5) and a binary WebSocket subprotocol.
 
 ## Decisions
 

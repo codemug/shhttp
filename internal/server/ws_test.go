@@ -340,3 +340,31 @@ func TestWebSocketEndpointsAreDocumented(t *testing.T) {
 		}
 	}
 }
+
+func TestTTYOverWebSocketAndHTTP(t *testing.T) {
+	ts := newServer(t)
+	key := ts.newKey(t, api.CreateKeyRequest{})
+	c := mustDialWS(t, ts, "/v2/exec", key)
+	c.send(api.ClientMessage{Type: api.MsgStart, Spec: &api.SessionSpec{
+		Shell: `read x; stty size; read y; stty size`,
+		TTY:   &api.TTYSize{Cols: 90, Rows: 20},
+	}})
+	sess := c.mustRecv().Session
+	c.send(api.ClientMessage{Type: api.MsgResize, Cols: 100, Rows: 30})
+	time.Sleep(50 * time.Millisecond)
+	c.send(api.ClientMessage{Type: api.MsgStdin, Data: "a\r"})
+	// Resizing over HTTP works too.
+	time.Sleep(200 * time.Millisecond)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions/"+sess.ID+"/resize", api.ResizeRequest{Cols: 110, Rows: 35}, nil), 200)
+	c.send(api.ClientMessage{Type: api.MsgStdin, Data: "b\r"})
+	msgs, _ := c.drain()
+	out := stdoutOf(msgs)
+	if !strings.Contains(out, "30 100") || !strings.Contains(out, "35 110") {
+		t.Fatalf("tty output %q", out)
+	}
+
+	// Resizing a session without a TTY is a conflict.
+	var plain api.Session
+	expect(t, ts.do(t, key, "POST", "/v2/sessions", api.SessionSpec{Argv: []string{"sleep", "30"}}, &plain), 201)
+	expect(t, ts.do(t, key, "POST", "/v2/sessions/"+plain.ID+"/resize", api.ResizeRequest{Cols: 80, Rows: 24}, nil), 409)
+}

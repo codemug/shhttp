@@ -13,6 +13,7 @@ import (
 
 	"github.com/codemug/shhttp/pkg/api"
 	"github.com/codemug/shhttp/pkg/client"
+	"golang.org/x/term"
 )
 
 func (a *app) run(args []string) error {
@@ -26,6 +27,7 @@ func (a *app) run(args []string) error {
 	noStdin := fs.Bool("n", false, "do not send local stdin; close the remote stdin at once")
 	detach := fs.Bool("d", false, "start the session in the background and print its id")
 	merge := fs.Bool("merge", false, "merge stderr into stdout, preserving their order")
+	tty := fs.Bool("t", false, "run on a terminal (for editors, REPLs, password prompts); puts the local terminal in raw mode")
 	onDisconnect := fs.String("on-disconnect", "kill", `what happens to the session if this client disconnects: "kill", "keep" or a grace period such as "1m"`)
 	if err := parse(fs, args, 0, -1); err != nil {
 		return err
@@ -52,6 +54,10 @@ func (a *app) run(args []string) error {
 		Labels:      labelMap,
 		StdinClose:  *noStdin,
 	}
+	if *tty {
+		cols, rows := a.termSize()
+		spec.TTY = &api.TTYSize{Cols: cols, Rows: rows}
+	}
 	c := a.client()
 	if *detach {
 		s, err := c.Create(a.ctx, spec)
@@ -66,6 +72,9 @@ func (a *app) run(args []string) error {
 		return err
 	}
 	defer conn.Close()
+	if *tty {
+		defer a.rawTerminal()()
+	}
 	return a.pump(conn, !*noStdin, true)
 }
 
@@ -82,6 +91,11 @@ func (a *app) attach(args []string) error {
 		return err
 	}
 	defer conn.Close()
+	if conn.Session().Spec.TTY != nil && !*readonly {
+		defer a.rawTerminal()()
+		cols, rows := a.termSize()
+		conn.Resize(a.ctx, cols, rows)
+	}
 	return a.pump(conn, !*readonly && !*noStdin, !*readonly)
 }
 
@@ -117,6 +131,13 @@ func (a *app) pump(conn *client.Conn, sendStdin, forwardSignals bool) error {
 			case sig, ok := <-a.env.Signals:
 				if !ok {
 					return
+				}
+				if winch != nil && sig == winch {
+					if forwardSignals {
+						cols, rows := a.termSize()
+						conn.Resize(ctx, cols, rows)
+					}
+					continue
 				}
 				if !forwardSignals {
 					interrupted <- sig
@@ -155,6 +176,9 @@ func (a *app) pump(conn *client.Conn, sendStdin, forwardSignals bool) error {
 			fmt.Fprintln(a.env.Stderr, "shhttp: session failed to start:", e.Error)
 			return exitError{255}
 		case api.EventExit:
+			if e.Error != "" {
+				fmt.Fprintln(a.env.Stderr, "shhttp:", e.Error)
+			}
 			return exitError{exitCode(e)}
 		}
 	}
@@ -337,4 +361,37 @@ func (a *app) rm(args []string) error {
 		}
 	}
 	return failed
+}
+
+// terminal returns the file descriptor of stdin if it is a terminal.
+func (a *app) terminal() (int, bool) {
+	f, ok := a.env.Stdin.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return 0, false
+	}
+	return int(f.Fd()), true
+}
+
+// termSize returns the local terminal's size, or 80x24.
+func (a *app) termSize() (cols, rows uint16) {
+	if fd, ok := a.terminal(); ok {
+		if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+			return uint16(w), uint16(h)
+		}
+	}
+	return 80, 24
+}
+
+// rawTerminal puts a local terminal in raw mode, so keys such as Ctrl-C
+// reach the remote program, and returns a function that restores it.
+func (a *app) rawTerminal() func() {
+	fd, ok := a.terminal()
+	if !ok {
+		return func() {}
+	}
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return func() {}
+	}
+	return func() { term.Restore(fd, state) }
 }

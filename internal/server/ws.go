@@ -45,7 +45,7 @@ func (s *Server) registerWebSocket() {
 	op.Description = "Upgrades to a WebSocket. Offer the `" + api.WSSubprotocol + "` subprotocol; browsers, which cannot set " +
 		"an Authorization header, also offer `" + api.WSAuthSubprotocolPrefix + "<key>`. " +
 		"The first client message must be `{\"type\":\"start\",\"spec\":{…}}`. The server answers with a `session` message " +
-		"followed by the session's events. Clients then send `stdin`, `stdin_close` and `signal` messages. " +
+		"followed by the session's events. Clients then send `stdin`, `stdin_close`, `signal` and, for TTY sessions, `resize` messages. " +
 		"The server closes the connection with status 1000 when the session ends. See docs/v2-design.md for the full protocol."
 	op.Responses = upgrade
 	huma.Register(s.api, op, func(ctx context.Context, _ *execInput) (*streamOutput, error) {
@@ -154,6 +154,8 @@ func (s *Server) serveSession(ctx context.Context, conn *websocket.Conn, sess ap
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer conn.CloseNow()
+	s.wsConns.Add(1)
+	defer s.wsConns.Add(-1)
 
 	if !readonly {
 		s.attached.add(sess.ID)
@@ -260,6 +262,13 @@ func (s *Server) readClient(ctx context.Context, cancel context.CancelFunc, conn
 				continue
 			}
 			s.log.Info("session signalled", "audit", true, "session", sid, "key", principalFrom(ctx).KeyID(), "signal", msg.Signal)
+		case api.MsgResize:
+			if err := s.sessions.Resize(sid, api.TTYSize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
+				var se huma.StatusError
+				if errors.As(s.apiError(err), &se) {
+					reject(se.GetStatus(), se.Error())
+				}
+			}
 		case api.MsgStart:
 			reject(http.StatusConflict, "the session has already started")
 		default:

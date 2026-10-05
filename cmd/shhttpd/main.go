@@ -105,6 +105,8 @@ func run(cfg config.Config) error {
 		DefaultRetention: cfg.DefaultRetention,
 		KillGrace:        cfg.KillGrace,
 		MaxSessions:      cfg.MaxSessions,
+		MaxOutputBytes:   cfg.MaxOutputBytes,
+		RunAs:            cfg.RunAs,
 		Logger:           logger,
 	}, st)
 	if err != nil {
@@ -139,7 +141,7 @@ func run(cfg config.Config) error {
 	srv := &http.Server{
 		Addr: cfg.Listen,
 		Handler: server.New(server.Deps{Auth: authn, Sessions: sessions, Jobs: jobs, Templates: template.NewService(st)},
-			logger, server.Options{Version: version, AllowedOrigins: cfg.AllowedOrigins}).Handler(),
+			logger, server.Options{Version: version, AllowedOrigins: cfg.AllowedOrigins, AuthFailureLimit: cfg.AuthFailureLimit}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
@@ -148,16 +150,21 @@ func run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	tls := cfg.TLSCert != ""
+	tlsConfig, err := cfg.TLSConfig()
+	if err != nil {
+		return err
+	}
+	srv.TLSConfig = tlsConfig
+	tls := tlsConfig != nil
 	if !tls && !isLoopback(ln.Addr()) {
 		logger.Warn("listening on a non-loopback address without TLS: API keys and command output travel in clear text", "addr", ln.Addr().String())
 	}
-	logger.Info("shhttpd listening", "addr", ln.Addr().String(), "tls", tls, "version", version, "data_dir", cfg.DataDir)
+	logger.Info("shhttpd listening", "addr", ln.Addr().String(), "tls", tls, "client_certificates", cfg.ClientCA != "", "version", version, "data_dir", cfg.DataDir)
 
 	serveErr := make(chan error, 1)
 	go func() {
 		if tls {
-			serveErr <- srv.ServeTLS(ln, cfg.TLSCert, cfg.TLSKey)
+			serveErr <- srv.ServeTLS(ln, "", "")
 		} else {
 			serveErr <- srv.Serve(ln)
 		}

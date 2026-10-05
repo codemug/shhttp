@@ -78,9 +78,22 @@ type SessionSpec struct {
 	// Retention is how long the session and its output are kept after the
 	// process ends. Zero means the server default.
 	Retention Duration `json:"retention,omitempty" doc:"Keep the session and its output this long after it ends. Defaults to the server setting." example:"24h"`
+	// TTY runs the process on a pseudo-terminal of this size, for programs
+	// that need one (editors, REPLs with line editing, sudo prompts). Output
+	// is a single stream (stdout), stderr included.
+	TTY *TTYSize `json:"tty,omitempty" doc:"Run on a pseudo-terminal of this size. Output, stderr included, arrives as stdout."`
 	// Labels are free-form metadata usable as list filters.
 	Labels map[string]string `json:"labels,omitempty" doc:"Free-form metadata usable as list filters."`
 }
+
+// TTYSize is a terminal size.
+type TTYSize struct {
+	Cols uint16 `json:"cols" minimum:"1" maximum:"1000" example:"120"`
+	Rows uint16 `json:"rows" minimum:"1" maximum:"1000" example:"40"`
+}
+
+// ResizeRequest is the body of POST /v2/sessions/{id}/resize.
+type ResizeRequest = TTYSize
 
 // SessionState is the lifecycle state of a session.
 type SessionState string
@@ -278,9 +291,19 @@ type Policy struct {
 	MaxTimeout Duration `json:"max_timeout,omitempty" doc:"Maximum session timeout, also used when none is given." example:"30m"`
 	// MaxConcurrentSessions caps how many sessions of this key run at once.
 	MaxConcurrentSessions int `json:"max_concurrent_sessions,omitempty" minimum:"0" doc:"Maximum running sessions for this key."`
+	// AllowTTY permits SessionSpec.TTY. Defaults to true.
+	AllowTTY *bool `json:"allow_tty,omitempty" doc:"Allow TTY sessions. Defaults to true."`
+	// RunAs runs this key's sessions as another OS user: "user",
+	// "user:group" or numeric ids. The server must run as root.
+	RunAs string `json:"run_as,omitempty" doc:"Run sessions as this OS user (user, user:group or uid:gid). Needs the server to run as root." example:"builder"`
+	// MaxOutputBytes kills a session whose output exceeds this many bytes.
+	MaxOutputBytes int64 `json:"max_output_bytes,omitempty" minimum:"0" doc:"Kill a session once its stdout and stderr exceed this many bytes."`
 	// Templates limits templates:run to these templates.
 	Templates []string `json:"templates,omitempty" doc:"Templates this key may run. Empty means all."`
 }
+
+// TTYAllowed reports whether the policy permits TTY sessions.
+func (p Policy) TTYAllowed() bool { return p.AllowTTY == nil || *p.AllowTTY }
 
 // ShellAllowed reports whether the policy permits shell sessions. Shell is
 // allowed unless explicitly disabled.
@@ -407,6 +430,7 @@ const (
 	MsgStdin      = "stdin"
 	MsgStdinClose = "stdin_close"
 	MsgSignal     = "signal"
+	MsgResize     = "resize"
 )
 
 // ClientMessage is a message from a WebSocket client.
@@ -423,6 +447,9 @@ type ClientMessage struct {
 	DataB64 []byte `json:"data_b64,omitempty"`
 	// signal
 	Signal string `json:"signal,omitempty"`
+	// resize (TTY sessions)
+	Cols uint16 `json:"cols,omitempty"`
+	Rows uint16 `json:"rows,omitempty"`
 }
 
 // Server message types besides the session event types.

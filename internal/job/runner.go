@@ -18,6 +18,7 @@ import (
 
 	"github.com/codemug/shhttp/internal/eventlog"
 	"github.com/codemug/shhttp/internal/id"
+	"github.com/codemug/shhttp/internal/metrics"
 	"github.com/codemug/shhttp/internal/session"
 	"github.com/codemug/shhttp/internal/store"
 	"github.com/codemug/shhttp/pkg/api"
@@ -557,6 +558,7 @@ func (r *Runner) finishJob(rn *run, cancelled bool) {
 	rn.mu.Unlock()
 
 	r.emit(rn, api.Event{Type: api.EventJobFinished, State: api.SessionState(state)})
+	metrics.JobsFinished.Inc(string(state))
 	rn.log.Close()
 	r.save(rn)
 	r.log.Info("job finished", "audit", true, "job", rn.job.ID, "key", rn.job.KeyID, "state", state)
@@ -650,6 +652,7 @@ func (r *Runner) Cancel(ctx context.Context, jobID string) (api.Job, error) {
 		if err := r.store.UpdateJob(ctx, j); err != nil {
 			return j, err
 		}
+		metrics.JobsFinished.Inc(string(api.JobCancelled))
 		r.log.Info("job cancelled", "audit", true, "job", j.ID)
 		return j, nil
 	}
@@ -778,6 +781,15 @@ func (r *Runner) Wait(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Counts returns how many jobs are running and queued.
+func (r *Runner) Counts(ctx context.Context) (running, queued int) {
+	r.mu.Lock()
+	running = len(r.active)
+	r.mu.Unlock()
+	q, _ := r.store.ListJobs(ctx, store.JobFilter{States: []api.JobState{api.JobQueued}})
+	return running, len(q)
 }
 
 // Queues lists queues with their current load.

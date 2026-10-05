@@ -363,3 +363,9 @@ func (c *Client) RevokeKey(ctx context.Context, id string, killSessions bool) (a
 	var r api.RevokeKeyResponse
 	return r, c.call(ctx, http.MethodDelete, "/v2/keys/"+url.PathEscape(id), q, nil, &r)
 }
+
+// Resize changes a TTY session's terminal size.
+func (c *Client) Resize(ctx context.Context, id string, cols, rows uint16) (api.Session, error) {
+	var s api.Session
+	return s, c.call(ctx, http.MethodPost, "/v2/sessions/"+url.PathEscape(id)+"/resize", nil, api.ResizeRequest{Cols: cols, Rows: rows}, &s)
+}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"os"
 	"os/signal"
-	"syscall"
 
 	"github.com/codemug/shhttp/internal/cli"
 )
@@ -18,7 +17,7 @@ func main() {
 	// Interrupts are forwarded to the remote session instead of stopping
 	// this process.
 	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigs, cli.ForwardedSignals()...)
 	os.Exit(cli.Main(context.Background(), os.Args[1:], cli.Env{
 		Stdin:   os.Stdin,
 		Stdout:  os.Stdout,

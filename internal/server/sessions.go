@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -89,6 +90,7 @@ type eventsInput struct {
 	From        uint64 `query:"from" doc:"First sequence number to return." default:"1"`
 	Follow      bool   `query:"follow" doc:"Keep the response open and stream new events until the session ends."`
 	Format      string `query:"format" enum:"ndjson,sse,raw" doc:"Overrides the Accept header."`
+	Lines       bool   `query:"lines" doc:"Re-chunk stdout and stderr into one event per complete line. A final partial line is sent when the process ends. Each line carries the seq of the chunk that completed it."`
 	Stream      string `query:"stream" enum:"stdout,stderr" default:"stdout" doc:"For the raw format, which stream to return."`
 	Accept      string `header:"Accept"`
 	LastEventID string `header:"Last-Event-ID" doc:"Server-sent events resume after this sequence number."`
@@ -112,6 +114,11 @@ func (in *stdinInput) Resolve(ctx huma.Context) []error {
 }
 
 type stdinOutput struct{ Body api.StdinResponse }
+
+type resizeInput struct {
+	SessionPath
+	Body api.ResizeRequest
+}
 
 type signalInput struct {
 	SessionPath
@@ -202,6 +209,21 @@ func (s *Server) registerSessions() {
 	op.MaxBodyBytes = maxJSONBody
 	op.Errors = append(op.Errors, http.StatusBadRequest, http.StatusNotFound, http.StatusConflict)
 	huma.Register(s.api, op, s.sessionSignal)
+
+	op = operation("resize-session", http.MethodPost, "/v2/sessions/{id}/resize", "Resize a TTY session", "Sessions", run)
+	op.Description = "Changes the terminal size of a session started with tty."
+	op.MaxBodyBytes = maxJSONBody
+	op.Errors = append(op.Errors, http.StatusNotFound, http.StatusConflict)
+	huma.Register(s.api, op, func(ctx context.Context, in *resizeInput) (*sessionOutput, error) {
+		sess, err := s.loadSession(ctx, in.ID, true)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.sessions.Resize(sess.ID, in.Body); err != nil {
+			return nil, s.apiError(err)
+		}
+		return &sessionOutput{Body: sess}, nil
+	})
 
 	op = operation("kill-session", http.MethodPost, "/v2/sessions/{id}/kill", "Kill a session", "Sessions", run)
 	op.Description = "Sends SIGTERM, then SIGKILL after the server's grace period. The session and its output are kept."
@@ -414,11 +436,11 @@ func (s *Server) sessionEvents(ctx context.Context, in *eventsInput) (*streamOut
 		return nil, s.apiError(err)
 	}
 	return &streamOutput{Body: func(hctx huma.Context) {
-		s.streamEvents(hctx, l, sess.ID, from, in.Follow, format, rawStream)
+		s.streamEvents(hctx, l, sess.ID, from, in.Follow, format, rawStream, in.Lines)
 	}}, nil
 }
 
-func (s *Server) streamEvents(hctx huma.Context, l *eventlog.Log, sid string, from uint64, follow bool, format streamFormat, rawStream api.EventType) {
+func (s *Server) streamEvents(hctx huma.Context, l *eventlog.Log, sid string, from uint64, follow bool, format streamFormat, rawStream api.EventType, lines bool) {
 	switch format {
 	case formatNDJSON:
 		hctx.SetHeader("Content-Type", "application/x-ndjson")
@@ -438,6 +460,10 @@ func (s *Server) streamEvents(hctx huma.Context, l *eventlog.Log, sid string, fr
 	}
 
 	ctx := hctx.Context()
+	var split *lineSplitter
+	if lines && format != formatRaw {
+		split = &lineSplitter{}
+	}
 	for {
 		readCtx, cancel := ctx, context.CancelFunc(func() {})
 		if format == formatSSE && follow {
@@ -455,7 +481,16 @@ func (s *Server) streamEvents(hctx huma.Context, l *eventlog.Log, sid string, fr
 			if err != io.EOF && ctx.Err() == nil {
 				s.log.Error("reading session events", "session", sid, "err", err)
 			}
+			if err == io.EOF && split != nil {
+				for _, e := range split.flush() {
+					writeEvent(w, format, rawStream, e)
+				}
+			}
 			return
+		}
+		next := evs[len(evs)-1].Seq + 1
+		if split != nil {
+			evs = split.feed(evs)
 		}
 		for _, e := range evs {
 			if err := writeEvent(w, format, rawStream, e); err != nil {
@@ -465,8 +500,70 @@ func (s *Server) streamEvents(hctx huma.Context, l *eventlog.Log, sid string, fr
 		if err := rc.Flush(); err != nil {
 			return
 		}
-		from = evs[len(evs)-1].Seq + 1
+		from = next
 	}
+}
+
+// maxLine bounds how much of a line without a newline is held back.
+const maxLine = 64 << 10
+
+// lineSplitter re-chunks output events into one event per line.
+type lineSplitter struct {
+	pending [2]*api.Event // stdout, stderr
+}
+
+func streamIndex(t api.EventType) int {
+	if t == api.EventStderr {
+		return 1
+	}
+	return 0
+}
+
+func (ls *lineSplitter) feed(evs []api.Event) []api.Event {
+	var out []api.Event
+	for _, e := range evs {
+		if e.Type != api.EventStdout && e.Type != api.EventStderr {
+			if e.Type == api.EventExit || e.Type == api.EventError {
+				out = append(out, ls.flush()...) // no more output will come
+			}
+			out = append(out, e)
+			continue
+		}
+		i := streamIndex(e.Type)
+		data := e.Data
+		if p := ls.pending[i]; p != nil {
+			data = append(p.Data, e.Data...)
+			ls.pending[i] = nil
+		}
+		for {
+			nl := bytes.IndexByte(data, '\n')
+			if nl < 0 && len(data) < maxLine {
+				break
+			}
+			end := nl + 1
+			if nl < 0 {
+				end = maxLine
+			}
+			out = append(out, api.Event{Seq: e.Seq, Time: e.Time, Type: e.Type, Data: bytes.Clone(data[:end])})
+			data = data[end:]
+		}
+		if len(data) > 0 {
+			ls.pending[i] = &api.Event{Seq: e.Seq, Time: e.Time, Type: e.Type, Data: bytes.Clone(data)}
+		}
+	}
+	return out
+}
+
+// flush returns the partial lines held back.
+func (ls *lineSplitter) flush() []api.Event {
+	var out []api.Event
+	for i, p := range ls.pending {
+		if p != nil {
+			out = append(out, *p)
+			ls.pending[i] = nil
+		}
+	}
+	return out
 }
 
 func writeEvent(w io.Writer, format streamFormat, rawStream api.EventType, e api.Event) error {

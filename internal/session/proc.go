@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/codemug/shhttp/internal/eventlog"
+	"github.com/codemug/shhttp/internal/metrics"
 	"github.com/codemug/shhttp/pkg/api"
 )
 
@@ -34,6 +39,11 @@ type proc struct {
 	// contiguous and the initial input comes first.
 	stdinMu sync.Mutex
 	stdin   io.WriteCloser
+
+	tty       *os.File // the pty master of a TTY session
+	maxOutput int64
+	outBytes  atomic.Int64
+	limitOnce sync.Once
 }
 
 func (p *proc) snapshot() api.Session {
@@ -59,23 +69,41 @@ func (p *proc) save() {
 func (p *proc) start(prep prepared) {
 	spec := p.meta.Spec
 	cmd := &exec.Cmd{
-		Path:        prep.path,
-		Args:        prep.args,
-		Dir:         prep.dir,
-		Env:         prep.env,
-		SysProcAttr: sysProcAttr(),
-		WaitDelay:   waitDelay,
+		Path:      prep.path,
+		Args:      prep.args,
+		Dir:       prep.dir,
+		Env:       append(slices.Clone(prep.env), sessionEnv+"="+p.meta.ID),
+		WaitDelay: waitDelay,
 	}
+	p.maxOutput = prep.maxOutput
 	stdout := &outWriter{p: p, typ: api.EventStdout}
 	stderr := stdout
-	if !spec.MergeStderr {
+	if !spec.MergeStderr && prep.tty == nil {
 		stderr = &outWriter{p: p, typ: api.EventStderr}
 	}
-	// Identical writers make exec use a single pipe for both streams.
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	stdin, err := cmd.StdinPipe()
-	if err == nil {
-		err = cmd.Start()
+	var stdin io.WriteCloser
+	var ttyDone chan struct{}
+	var err error
+	if prep.tty != nil {
+		var master *os.File
+		master, err = startPTY(cmd, sysProcAttr(true, prep.cred), prep.tty.Cols, prep.tty.Rows)
+		if err == nil {
+			p.tty = master
+			stdin = ttyInput{master}
+			ttyDone = make(chan struct{})
+			go func() {
+				defer close(ttyDone)
+				io.Copy(stdout, master) // ends with EIO once the terminal is closed
+			}()
+		}
+	} else {
+		cmd.SysProcAttr = sysProcAttr(false, prep.cred)
+		// Identical writers make exec use a single pipe for both streams.
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+		stdin, err = cmd.StdinPipe()
+		if err == nil {
+			err = cmd.Start()
+		}
 	}
 	if err != nil {
 		p.failStart(err)
@@ -112,7 +140,7 @@ func (p *proc) start(prep prepared) {
 	if prep.timeout > 0 {
 		timer = time.AfterFunc(prep.timeout, func() { p.terminate(api.StateTimedOut) })
 	}
-	go p.wait(cmd, timer, stdout, stderr)
+	go p.wait(cmd, timer, stdout, stderr, ttyDone)
 
 	p.m.mu.Lock()
 	closing := p.m.closing
@@ -132,6 +160,7 @@ func (p *proc) failStart(err error) {
 	p.meta.ExpiresAt = &expires
 	p.mu.Unlock()
 	p.emit(api.Event{Type: api.EventError, Error: err.Error()})
+	metrics.SessionsFinished.Inc(string(api.StateFailedToStart))
 	p.log.Close()
 	p.save()
 	p.m.forget(p)
@@ -145,10 +174,20 @@ func (p *proc) retention() time.Duration {
 	return p.m.cfg.DefaultRetention
 }
 
-func (p *proc) wait(cmd *exec.Cmd, timer *time.Timer, stdout, stderr *outWriter) {
+func (p *proc) wait(cmd *exec.Cmd, timer *time.Timer, stdout, stderr *outWriter, ttyDone chan struct{}) {
 	err := cmd.Wait()
 	if timer != nil {
 		timer.Stop()
+	}
+	if ttyDone != nil {
+		// Collect the terminal's remaining output; processes still holding
+		// the terminal get as long as WaitDelay before it is closed.
+		select {
+		case <-ttyDone:
+		case <-time.After(waitDelay):
+		}
+		p.tty.Close()
+		<-ttyDone
 	}
 	stdout.flush()
 	if stderr != stdout {
@@ -180,7 +219,8 @@ func (p *proc) wait(cmd *exec.Cmd, timer *time.Timer, stdout, stderr *outWriter)
 	meta := p.meta
 	p.mu.Unlock()
 
-	p.emit(api.Event{Type: api.EventExit, State: meta.State, ExitCode: code, Signal: sig, DurationMS: &d})
+	p.emit(api.Event{Type: api.EventExit, State: meta.State, ExitCode: code, Signal: sig, DurationMS: &d, Error: meta.Error})
+	metrics.SessionsFinished.Inc(string(meta.State))
 	p.log.Close()
 	p.save()
 	p.m.log.Info("session ended", "audit", true, "session", meta.ID, "key", meta.KeyID,
@@ -213,6 +253,36 @@ func (p *proc) terminate(state api.SessionState) {
 			p.emit(api.Event{Type: api.EventSignal, Signal: "SIGKILL"})
 		}
 	}()
+}
+
+func (p *proc) resize(size api.TTYSize) error {
+	if p.tty == nil {
+		return ErrNotTTY
+	}
+	if p.snapshot().State != api.StateRunning {
+		return ErrNotRunning
+	}
+	return resizePTY(p.tty, size.Cols, size.Rows)
+}
+
+// outputLimit stops a session whose output exceeded its limit.
+func (p *proc) outputLimit() {
+	p.limitOnce.Do(func() {
+		p.mu.Lock()
+		p.meta.Error = fmt.Sprintf("output limit of %d bytes exceeded", p.maxOutput)
+		p.mu.Unlock()
+		go p.terminate(api.StateKilled)
+	})
+}
+
+// ttyInput writes to a terminal. Closing it sends end-of-file (Ctrl-D)
+// rather than closing the terminal, which would hang up the session.
+type ttyInput struct{ f *os.File }
+
+func (t ttyInput) Write(b []byte) (int, error) { return t.f.Write(b) }
+func (t ttyInput) Close() error {
+	_, err := t.f.Write([]byte{4})
+	return err
 }
 
 func (p *proc) signal(name string) error {
@@ -299,6 +369,17 @@ type outWriter struct {
 }
 
 func (w *outWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	if limit := w.p.maxOutput; limit > 0 {
+		before := w.p.outBytes.Add(int64(n)) - int64(n)
+		if before >= limit {
+			return n, nil // over the limit: discard while the session stops
+		}
+		if before+int64(n) > limit {
+			b = b[:limit-before]
+			defer w.p.outputLimit()
+		}
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	buf := b
@@ -312,10 +393,11 @@ func (w *outWriter) Write(b []byte) (int, error) {
 	}
 	if cut > 0 {
 		w.p.emit(api.Event{Type: w.typ, Data: bytes.Clone(buf[:cut])})
+		metrics.OutputBytes.Add(float64(cut))
 	}
 	// Errors are logged by emit; failing here would kill the process with
 	// SIGPIPE.
-	return len(b), nil
+	return n, nil
 }
 
 func (w *outWriter) flush() {

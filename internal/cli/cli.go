@@ -68,6 +68,9 @@ Environment:
   SHHTTP_URL          server URL (default http://127.0.0.1:2112)
   SHHTTP_KEY          API key
   SHHTTP_MASTER_KEY   master key, used by the key commands when set
+  SHHTTP_CA_CERT      PEM file of CAs to trust for the server's certificate
+  SHHTTP_CLIENT_CERT, SHHTTP_CLIENT_KEY
+                      client certificate, for servers that require one
 
 Run 'shhttp <command> -h' for the flags of a command.
 `
@@ -133,11 +136,18 @@ func Main(ctx context.Context, args []string, env Env) int {
 		defer cancel()
 		a.ctx = ctx
 		go func() {
-			select {
-			case <-env.Signals:
-				interrupted.Store(true)
-				cancel()
-			case <-ctx.Done():
+			for {
+				select {
+				case sig := <-env.Signals:
+					if winch != nil && sig == winch {
+						continue // a window resize is not an interrupt
+					}
+					interrupted.Store(true)
+					cancel()
+					return
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
@@ -176,14 +186,30 @@ func describe(err error) string {
 	return err.Error()
 }
 
-func (a *app) client() *client.Client { return client.New(a.url, a.key) }
+func (a *app) client() *client.Client { return client.New(a.url, a.key, a.tlsOptions()...) }
 
 // masterClient uses SHHTTP_MASTER_KEY when set, unless -key was given.
 func (a *app) masterClient() *client.Client {
 	if a.master != "" && a.key == a.env.Getenv("SHHTTP_KEY") {
-		return client.New(a.url, a.master)
+		return client.New(a.url, a.master, a.tlsOptions()...)
 	}
 	return a.client()
+}
+
+// tlsOptions applies SHHTTP_CA_CERT, SHHTTP_CLIENT_CERT and
+// SHHTTP_CLIENT_KEY. A broken configuration is reported and ignored, so the
+// request fails with the server's TLS error.
+func (a *app) tlsOptions() []client.Option {
+	ca, cert, key := a.env.Getenv("SHHTTP_CA_CERT"), a.env.Getenv("SHHTTP_CLIENT_CERT"), a.env.Getenv("SHHTTP_CLIENT_KEY")
+	if ca == "" && cert == "" && key == "" {
+		return nil
+	}
+	cfg, err := client.TLSFromFiles(ca, cert, key)
+	if err != nil {
+		fmt.Fprintln(a.env.Stderr, "shhttp: TLS settings:", err)
+		return nil
+	}
+	return []client.Option{client.WithTLSConfig(cfg)}
 }
 
 // flags returns a flag set for a command that prints its usage on -h.

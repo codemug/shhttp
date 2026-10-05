@@ -233,7 +233,7 @@ func (s *Server) registerJobs() {
 			return nil, s.apiError(err)
 		}
 		return &streamOutput{Body: func(hctx huma.Context) {
-			s.streamEvents(hctx, l, j.ID, from, in.Follow, format, "")
+			s.streamEvents(hctx, l, j.ID, from, in.Follow, format, "", false)
 		}}, nil
 	})
 

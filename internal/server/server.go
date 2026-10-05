@@ -11,11 +11,14 @@ import (
 	"reflect"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/codemug/shhttp/internal/auth"
 	"github.com/codemug/shhttp/internal/job"
+	"github.com/codemug/shhttp/internal/metrics"
 	"github.com/codemug/shhttp/internal/policy"
 	"github.com/codemug/shhttp/internal/session"
 	"github.com/codemug/shhttp/internal/store"
@@ -51,6 +54,9 @@ type Options struct {
 	// connections. Same-origin pages and non-browser clients are always
 	// allowed.
 	AllowedOrigins []string
+	// AuthFailureLimit refuses authentication from an IP for a minute after
+	// this many failures within a minute. Zero disables the limit.
+	AuthFailureLimit int
 }
 
 // Deps are the services the server exposes.
@@ -72,6 +78,8 @@ type Server struct {
 	mux       *http.ServeMux
 	api       huma.API
 	attached  *attachments
+	limiter   *failLimiter
+	wsConns   atomic.Int64
 }
 
 // New returns a Server.
@@ -79,6 +87,7 @@ func New(d Deps, logger *slog.Logger, opts Options) *Server {
 	s := &Server{
 		auth: d.Auth, sessions: d.Sessions, jobs: d.Jobs, templates: d.Templates,
 		log: logger, opts: opts, mux: http.NewServeMux(), attached: newAttachments(),
+		limiter: newFailLimiter(opts.AuthFailureLimit, time.Minute),
 	}
 
 	config := huma.DefaultConfig("shhttp", APIVersion)
@@ -107,6 +116,7 @@ func New(d Deps, logger *slog.Logger, opts Options) *Server {
 	s.registerWebSocket()
 	s.registerJobs()
 	s.registerTemplates()
+	s.registerMetrics()
 	return s
 }
 
@@ -134,7 +144,15 @@ func (s *Server) Handler() http.Handler {
 			s.log.Debug("request", "method", r.Method, "path", r.URL.Path, "status", sw.status,
 				"duration_ms", time.Since(start).Milliseconds(), "remote", r.RemoteAddr)
 		}()
-		if h, pattern := s.mux.Handler(r); pattern == "" {
+		h, pattern := s.mux.Handler(r)
+		defer func() {
+			route := pattern
+			if route == "" {
+				route = "unmatched"
+			}
+			metrics.HTTPRequests.Inc(route, strconv.Itoa(sw.status))
+		}()
+		if pattern == "" {
 			// No route matched: let the mux pick 404 or 405 (with its Allow
 			// header), then answer in the API's error format.
 			rec := &statusRecorder{header: http.Header{}}
@@ -238,17 +256,27 @@ func (s *Server) authenticate(ctx huma.Context, next func(huma.Context)) {
 		next(ctx)
 		return
 	}
+	ip := clientIP(ctx.RemoteAddr())
+	if s.limiter.blocked(ip) {
+		ctx.SetHeader("Retry-After", "60")
+		huma.WriteErr(s.api, ctx, http.StatusTooManyRequests, "too many failed authentication attempts; try again later")
+		return
+	}
 	token, ok := strings.CutPrefix(ctx.Header("Authorization"), "Bearer ")
 	if !ok && a.websocket {
 		token, ok = subprotocolKey(ctx.Header("Sec-WebSocket-Protocol"))
 	}
 	if !ok || strings.TrimSpace(token) == "" {
+		metrics.AuthFailures.Inc()
 		ctx.SetHeader("WWW-Authenticate", `Bearer realm="shhttp"`)
 		huma.WriteErr(s.api, ctx, http.StatusUnauthorized, "an Authorization: Bearer <key> header is required")
 		return
 	}
 	p, err := s.auth.Authenticate(ctx.Context(), strings.TrimSpace(token))
 	if errors.Is(err, auth.ErrUnauthorized) {
+		metrics.AuthFailures.Inc()
+		s.limiter.fail(ip)
+		s.log.Warn("authentication failed", "audit", true, "remote", ip)
 		ctx.SetHeader("WWW-Authenticate", `Bearer realm="shhttp", error="invalid_token"`)
 		huma.WriteErr(s.api, ctx, http.StatusUnauthorized, "the key is invalid, expired or revoked")
 		return
@@ -333,6 +361,7 @@ func (s *Server) apiError(err error) error {
 		errors.Is(err, job.ErrNotFound), errors.Is(err, template.ErrNotFound):
 		return huma.Error404NotFound("not found")
 	case errors.Is(err, session.ErrNotRunning), errors.Is(err, session.ErrStdinClosed), errors.Is(err, auth.ErrRevoked),
+		errors.Is(err, session.ErrNotTTY),
 		errors.Is(err, job.ErrFinished), errors.Is(err, job.ErrQueueInUse):
 		return huma.Error409Conflict(err.Error())
 	case errors.As(err, &sessInvalid), errors.As(err, &keyInvalid), errors.As(err, &jobInvalid), errors.As(err, &tplInvalid):

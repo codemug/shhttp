@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/codemug/shhttp/internal/eventlog"
 	"github.com/codemug/shhttp/internal/id"
+	"github.com/codemug/shhttp/internal/metrics"
 	"github.com/codemug/shhttp/internal/policy"
 	"github.com/codemug/shhttp/internal/store"
 	"github.com/codemug/shhttp/pkg/api"
@@ -60,8 +62,22 @@ type Config struct {
 	KillGrace time.Duration
 	// MaxSessions caps running sessions across all keys. Zero means no cap.
 	MaxSessions int
-	Logger      *slog.Logger
+	// MaxOutputBytes kills sessions whose output exceeds it. Zero means no
+	// limit; a key's policy can set a lower one.
+	MaxOutputBytes int64
+	// RunAs runs sessions as this OS user unless a key's policy names
+	// another. Empty means the server's own user.
+	RunAs  string
+	Logger *slog.Logger
 }
+
+// sessionEnv is set in every session's environment to its session id. It
+// lets processes know their session and lets the server find processes
+// left behind by a crash.
+const sessionEnv = "SHHTTP_SESSION_ID"
+
+// ErrNotTTY means the operation needs a TTY session.
+var ErrNotTTY = errors.New("the session has no TTY")
 
 // Owner is the API key starting a session.
 type Owner struct {
@@ -101,7 +117,8 @@ func NewManager(ctx context.Context, cfg Config, st *store.Store) (*Manager, err
 		return nil, err
 	}
 	if len(lost) > 0 {
-		cfg.Logger.Warn("marked sessions from the previous run as lost", "count", len(lost))
+		killed := reapOrphans(lost)
+		cfg.Logger.Warn("marked sessions from the previous run as lost", "count", len(lost), "orphan_processes_killed", killed)
 	}
 	return &Manager{cfg: cfg, store: st, log: cfg.Logger, running: map[string]*proc{}}, nil
 }
@@ -112,12 +129,15 @@ func (m *Manager) logPath(sessionID string) string {
 
 // prepared is a validated spec ready to start.
 type prepared struct {
-	path    string
-	args    []string
-	dir     string
-	env     []string
-	timeout time.Duration
-	stdin   []byte
+	path      string
+	args      []string
+	dir       string
+	env       []string
+	timeout   time.Duration
+	stdin     []byte
+	tty       *api.TTYSize
+	cred      *credential
+	maxOutput int64
 }
 
 func (m *Manager) prepare(spec *api.SessionSpec, owner Owner) (prepared, error) {
@@ -177,8 +197,18 @@ func (m *Manager) prepare(spec *api.SessionSpec, owner Owner) (prepared, error) 
 		envKeys = append(envKeys, k)
 	}
 	sort.Strings(envKeys)
+	if spec.TTY != nil {
+		if runtime.GOOS == "windows" {
+			return p, invalid("TTY sessions are not supported on Windows")
+		}
+		if spec.TTY.Cols == 0 || spec.TTY.Rows == 0 {
+			spec.TTY = &api.TTYSize{Cols: 80, Rows: 24}
+		}
+		p.tty = spec.TTY
+	}
 	timeout, err := policy.Check(owner.Policy, policy.Request{
 		Shell:   spec.Shell != "",
+		TTY:     spec.TTY != nil,
 		Path:    p.path,
 		Cwd:     p.dir,
 		EnvKeys: envKeys,
@@ -193,8 +223,29 @@ func (m *Manager) prepare(spec *api.SessionSpec, owner Owner) (prepared, error) 
 	if spec.InheritEnv == nil || *spec.InheritEnv {
 		p.env = os.Environ()
 	}
+	runAs := owner.Policy.RunAs
+	if runAs == "" {
+		runAs = m.cfg.RunAs
+	}
+	if runAs != "" {
+		cred, userEnv, err := lookupRunAs(runAs)
+		if err != nil {
+			return p, invalid("%v", err)
+		}
+		p.cred = cred
+		for _, k := range sortedKeys(userEnv) {
+			p.env = append(p.env, k+"="+userEnv[k])
+		}
+	}
+	if p.tty != nil && spec.Env["TERM"] == "" {
+		p.env = append(p.env, "TERM=xterm-256color")
+	}
 	for _, k := range envKeys {
 		p.env = append(p.env, k+"="+spec.Env[k])
+	}
+	p.maxOutput = m.cfg.MaxOutputBytes
+	if l := owner.Policy.MaxOutputBytes; l > 0 && (p.maxOutput == 0 || l < p.maxOutput) {
+		p.maxOutput = l
 	}
 	if p.env == nil {
 		p.env = []string{}
@@ -273,6 +324,7 @@ func (m *Manager) Create(ctx context.Context, owner Owner, spec api.SessionSpec)
 		return api.Session{}, err
 	}
 	p.start(prep)
+	metrics.SessionsStarted.Inc()
 	m.log.Info("session started", "audit", true, "session", p.meta.ID, "key", owner.KeyID,
 		"argv", spec.Argv, "shell", spec.Shell, "cwd", prep.dir, "state", p.snapshot().State)
 	return p.snapshot(), nil
@@ -365,6 +417,25 @@ func (m *Manager) WriteStdin(sessionID string, r io.Reader, closeAfter bool) (in
 		return 0, err
 	}
 	return p.writeStdin(r, closeAfter)
+}
+
+// Running returns how many sessions are running.
+func (m *Manager) Running() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.running)
+}
+
+// Resize changes a TTY session's terminal size.
+func (m *Manager) Resize(sessionID string, size api.TTYSize) error {
+	if size.Cols == 0 || size.Rows == 0 {
+		return invalid("cols and rows must be at least 1")
+	}
+	p, err := m.mustRun(sessionID)
+	if err != nil {
+		return err
+	}
+	return p.resize(size)
 }
 
 // Signal sends a signal to the session's process group.
@@ -477,4 +548,13 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

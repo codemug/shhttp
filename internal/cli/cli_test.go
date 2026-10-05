@@ -326,3 +326,23 @@ func TestQueueAndTemplateCommands(t *testing.T) {
 		t.Fatalf("template rm: %+v", r)
 	}
 }
+
+func TestRunTTY(t *testing.T) {
+	h := newHarness(t)
+	r := h.run("", "run", "-t", "-n", "-c", `[ -t 1 ] && echo "on a tty"; stty size`)
+	if r.code != 0 || !strings.Contains(r.stdout, "on a tty") || !strings.Contains(r.stdout, "24 80") {
+		t.Fatalf("run -t: %+v", r)
+	}
+}
+
+func TestOutputLimitIsReported(t *testing.T) {
+	h := newHarness(t)
+	var k api.KeyWithSecret
+	r := h.run(`{"max_output_bytes": 100}`, "key", "create", "-name", "small", "-scope", "sessions:run", "-policy", "-")
+	json.Unmarshal([]byte(r.stdout), &k)
+	h.env["SHHTTP_KEY"] = k.Secret
+	r = h.run("", "run", "-n", "-c", "while :; do echo spam; done")
+	if r.code == 0 || !strings.Contains(r.stderr, "output limit of 100 bytes exceeded") {
+		t.Fatalf("result %+v", r)
+	}
+}

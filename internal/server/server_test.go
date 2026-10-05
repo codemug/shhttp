@@ -28,7 +28,7 @@ type testServer struct {
 	master string
 }
 
-func newServer(t *testing.T) *testServer {
+func newServer(t *testing.T, opts ...func(*Options)) *testServer {
 	t.Helper()
 	dir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -53,7 +53,11 @@ func newServer(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 	deps := Deps{Auth: a, Sessions: m, Jobs: jobs, Templates: template.NewService(st)}
-	ts := httptest.NewServer(New(deps, logger, Options{Version: "test"}).Handler())
+	o := Options{Version: "test"}
+	for _, f := range opts {
+		f(&o)
+	}
+	ts := httptest.NewServer(New(deps, logger, o).Handler())
 	t.Cleanup(func() {
 		jobs.Stop()
 		m.Shutdown(context.Background())
@@ -566,5 +570,72 @@ func TestOpenAPIDocument(t *testing.T) {
 	}
 	if r, _ := ts.Client().Get(ts.URL + "/v2/docs"); r == nil || r.StatusCode != 200 {
 		t.Error("/v2/docs not served")
+	}
+}
+
+func TestFailedAuthenticationIsRateLimited(t *testing.T) {
+	ts := newServer(t, func(o *Options) { o.AuthFailureLimit = 3 })
+	key := ts.newKey(t, api.CreateKeyRequest{})
+	for i := 0; i < 3; i++ {
+		expect(t, ts.do(t, "shh_01m44d45k8rtmntd23jgq0qkk5_wrong", "GET", "/v2/sessions", nil, nil), 401)
+	}
+	// Even a valid key is refused from this IP until the window ends.
+	expect(t, ts.do(t, key, "GET", "/v2/sessions", nil, nil), 429)
+	expect(t, ts.do(t, "", "GET", "/healthz", nil, nil), 200)
+}
+
+func TestMetrics(t *testing.T) {
+	ts := newServer(t)
+	key := ts.newKey(t, api.CreateKeyRequest{})
+	admin := ts.newKey(t, api.CreateKeyRequest{Scopes: []string{api.ScopeAdminRead}})
+	ts.do(t, key, "POST", "/v2/sessions?wait=true", api.SessionSpec{Argv: []string{"echo", "hi"}}, nil)
+	expect(t, ts.do(t, key, "GET", "/metrics", nil, nil), 403)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	text := string(body)
+	for _, want := range []string{
+		"# TYPE shhttp_sessions_started_total counter",
+		`shhttp_sessions_finished_total{state="exited"}`,
+		`shhttp_http_requests_total{route="POST /v2/sessions",status="200"}`,
+		"shhttp_sessions_running ",
+		"shhttp_jobs_queued ",
+		"shhttp_session_output_bytes_total ",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/plain") {
+		t.Errorf("content type %q", resp.Header.Get("Content-Type"))
+	}
+}
+
+func TestLinesMode(t *testing.T) {
+	ts := newServer(t)
+	key := ts.newKey(t, api.CreateKeyRequest{})
+	var s api.Session
+	expect(t, ts.do(t, key, "POST", "/v2/sessions?wait=true", api.SessionSpec{
+		Shell: `printf 'one\ntw'; sleep 0.1; printf 'o\nthree\nfour'; sleep 0.1; printf 'err\n' >&2`,
+	}, &struct{ Session *api.Session }{&s}), 200)
+	evs := streamEvents(t, ts, key, "/v2/sessions/"+s.ID+"/events?lines=true", nil)
+	var got []string
+	for _, e := range evs {
+		if e.Type == api.EventStdout || e.Type == api.EventStderr {
+			got = append(got, string(e.Type)+":"+string(e.Data))
+		}
+	}
+	want := []string{"stdout:one\n", "stdout:two\n", "stdout:three\n", "stderr:err\n", "stdout:four"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines %q, want %q", got, want)
+	}
+	if last := evs[len(evs)-1]; last.Type != api.EventExit {
+		t.Fatalf("last event %+v", last)
 	}
 }
