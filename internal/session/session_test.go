@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codemug/shhttp/v2/internal/id"
 	"github.com/codemug/shhttp/v2/internal/policy"
 	"github.com/codemug/shhttp/v2/internal/store"
 	"github.com/codemug/shhttp/v2/pkg/api"
@@ -378,15 +379,22 @@ func TestDeleteAndSweep(t *testing.T) {
 
 func TestRestartMarksRunningSessionsLost(t *testing.T) {
 	e := setup(t)
-	s := e.create(t, api.SessionSpec{Argv: []string{"sleep", "30"}})
-	// Simulate a crash: a second manager starts on the same store while the
-	// first still believes the session is running.
+	// What a crashed server leaves behind: a session recorded as running
+	// whose process is gone. (A live process cannot stand in for it: the
+	// restarted manager reaps it, and its old manager would then record
+	// the kill. Reaping has its own test.)
+	now := time.Now().UTC()
+	left := api.Session{ID: id.New(id.Session), KeyID: "key_test", Spec: api.SessionSpec{Argv: []string{"sleep", "30"}},
+		State: api.StateRunning, PID: 999999, CreatedAt: now, StartedAt: &now}
+	if err := e.st.InsertSession(context.Background(), left); err != nil {
+		t.Fatal(err)
+	}
 	m2, err := NewManager(context.Background(), Config{DataDir: e.dir, Logger: e.m.log}, e.st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := m2.Get(context.Background(), s.ID)
-	if err != nil || got.State != api.StateLost {
+	got, err := m2.Get(context.Background(), left.ID)
+	if err != nil || got.State != api.StateLost || got.Error == "" || got.ExpiresAt == nil {
 		t.Fatalf("after restart: %+v, %v", got, err)
 	}
 }
