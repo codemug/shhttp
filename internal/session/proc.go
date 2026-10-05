@@ -14,9 +14,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/codemug/shhttp/internal/eventlog"
-	"github.com/codemug/shhttp/internal/metrics"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/eventlog"
+	"github.com/codemug/shhttp/v2/internal/metrics"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 // waitDelay bounds how long a session waits, after its process exits, for

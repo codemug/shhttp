@@ -6,11 +6,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/codemug/shhttp/internal/id"
-	"github.com/codemug/shhttp/internal/session"
-	"github.com/codemug/shhttp/internal/store"
-	"github.com/codemug/shhttp/internal/template"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/id"
+	"github.com/codemug/shhttp/v2/internal/session"
+	"github.com/codemug/shhttp/v2/internal/store"
+	"github.com/codemug/shhttp/v2/internal/template"
+	"github.com/codemug/shhttp/v2/pkg/api"
 	"github.com/danielgtaylor/huma/v2"
 )
 

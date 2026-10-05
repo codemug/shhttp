@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/api"
 	"github.com/coder/websocket"
 )
 

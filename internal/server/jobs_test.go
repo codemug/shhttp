@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 func allScopesKey(t *testing.T, ts *testServer, policy api.Policy) string {

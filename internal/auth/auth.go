@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codemug/shhttp/internal/id"
-	"github.com/codemug/shhttp/internal/store"
+	"github.com/codemug/shhttp/v2/internal/id"
+	"github.com/codemug/shhttp/v2/internal/store"
 )
 
 const (

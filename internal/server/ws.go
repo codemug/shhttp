@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codemug/shhttp/internal/session"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/session"
+	"github.com/codemug/shhttp/v2/pkg/api"
 	"github.com/coder/websocket"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"

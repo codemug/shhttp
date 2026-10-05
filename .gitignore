@@ -15,3 +15,6 @@ vendor
 .idea
 # Default server data directory
 shhttp-data/
+
+# goreleaser output
+dist/

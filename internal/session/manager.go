@@ -18,12 +18,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codemug/shhttp/internal/eventlog"
-	"github.com/codemug/shhttp/internal/id"
-	"github.com/codemug/shhttp/internal/metrics"
-	"github.com/codemug/shhttp/internal/policy"
-	"github.com/codemug/shhttp/internal/store"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/eventlog"
+	"github.com/codemug/shhttp/v2/internal/id"
+	"github.com/codemug/shhttp/v2/internal/metrics"
+	"github.com/codemug/shhttp/v2/internal/policy"
+	"github.com/codemug/shhttp/v2/internal/store"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 var (

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 func ptr(s string) *string { return &s }

@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codemug/shhttp/internal/store"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/store"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 // ErrNotFound means the template does not exist.

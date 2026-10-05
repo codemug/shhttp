@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/codemug/shhttp/internal/auth"
-	"github.com/codemug/shhttp/internal/job"
-	"github.com/codemug/shhttp/internal/server"
-	"github.com/codemug/shhttp/internal/session"
-	"github.com/codemug/shhttp/internal/store"
-	"github.com/codemug/shhttp/internal/template"
+	"github.com/codemug/shhttp/v2/internal/auth"
+	"github.com/codemug/shhttp/v2/internal/job"
+	"github.com/codemug/shhttp/v2/internal/server"
+	"github.com/codemug/shhttp/v2/internal/session"
+	"github.com/codemug/shhttp/v2/internal/store"
+	"github.com/codemug/shhttp/v2/internal/template"
 )
 
 // Server is a running test server.

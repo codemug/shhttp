@@ -5,8 +5,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/codemug/shhttp/internal/metrics"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/metrics"
+	"github.com/codemug/shhttp/v2/pkg/api"
 	"github.com/danielgtaylor/huma/v2"
 )
 

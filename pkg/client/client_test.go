@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/codemug/shhttp/internal/testserver"
-	"github.com/codemug/shhttp/pkg/api"
-	"github.com/codemug/shhttp/pkg/client"
+	"github.com/codemug/shhttp/v2/internal/testserver"
+	"github.com/codemug/shhttp/v2/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/client"
 )
 
 func setup(t *testing.T) (master, user *client.Client, ctx context.Context) {

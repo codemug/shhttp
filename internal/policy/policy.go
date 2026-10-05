@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 // DeniedError reports that a policy forbids a request.

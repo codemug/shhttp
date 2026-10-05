@@ -11,8 +11,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/codemug/shhttp/pkg/api"
-	"github.com/codemug/shhttp/pkg/client"
+	"github.com/codemug/shhttp/v2/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/client"
 	"golang.org/x/term"
 )
 

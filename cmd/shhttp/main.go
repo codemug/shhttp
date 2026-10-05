@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/codemug/shhttp/internal/cli"
+	"github.com/codemug/shhttp/v2/internal/cli"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

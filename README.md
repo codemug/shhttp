@@ -2,7 +2,9 @@
 
 shhttp runs commands on the machine it is installed on and streams their output to any HTTP client. Clients can send stdin while the command runs, send signals, disconnect, and come back later to replay the output from any point.
 
-> **Status:** v2 is being rebuilt from scratch on the `v2` branch. Sessions, streaming over HTTP and WebSocket, stdin, jobs, queues, templates, API keys, a CLI and a Go client library work today; terminal (TTY) support and hardening are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. v1 has been removed; its last version is on the `master` branch.
+It is built for any client: curl and shell scripts, programs in any language (the server publishes an OpenAPI document), interactive terminals (`shhttp run -t`), and AI agents (`shhttp mcp`).
+
+> **Status:** v2 is a rewrite, developed on the `v2` branch. All planned features are implemented; see [docs/v2-design.md](docs/v2-design.md) for the design and [docs/protocol.md](docs/protocol.md) for the streaming and WebSocket protocol. The last v1 is on the `master` branch.
 
 ## Concepts
 
@@ -12,12 +14,13 @@ shhttp runs commands on the machine it is installed on and streams their output 
 
 ## Quick start
 
-Requires Go 1.26 or newer.
+Download `shhttpd` (the server) and `shhttp` (the client) from the releases page, or build them with Go 1.26 or newer:
 
 ```sh
-git clone -b v2 https://github.com/codemug/shhttp && cd shhttp
-go build -o shhttpd ./cmd/shhttpd     # the server
-go build -o shhttp ./cmd/shhttp       # the command-line client
+go install github.com/codemug/shhttp/v2/cmd/shhttpd@latest github.com/codemug/shhttp/v2/cmd/shhttp@latest
+# or, from a checkout of the v2 branch:
+go build -o shhttpd ./cmd/shhttpd && go build -o shhttp ./cmd/shhttp
+
 ./shhttpd                             # listens on 127.0.0.1:2112, stores data in ./shhttp-data
 ```
 
@@ -173,8 +176,8 @@ Connect to `/v2/exec` offering the subprotocol `shhttp.v2.json`, then send a sta
 
 ```go
 import (
-	"github.com/codemug/shhttp/pkg/api"
-	"github.com/codemug/shhttp/pkg/client"
+	"github.com/codemug/shhttp/v2/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/client"
 )
 
 c := client.New("http://127.0.0.1:2112", os.Getenv("SHHTTP_KEY"))
@@ -301,6 +304,31 @@ POST /v2/keys
 }
 ```
 
+### AI agents (MCP)
+
+`shhttp mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin/stdout. It gives an agent tools to run commands, start interactive sessions, send input, read output incrementally, send signals, run templates and check jobs, all through your shhttp server and under the key you give it. Give the agent its own key with the narrowest scopes and policy that work, for example only `templates:run` and `sessions:read`.
+
+```jsonc
+// MCP client configuration, e.g. for Claude Code or Claude Desktop
+{
+  "mcpServers": {
+    "shhttp": {
+      "command": "shhttp",
+      "args": ["mcp"],
+      "env": {"SHHTTP_URL": "https://build-box:2112", "SHHTTP_KEY": "shh_…"}
+    }
+  }
+}
+```
+
+| Tool | Does |
+|---|---|
+| `run_command` | Run a command and wait (up to `wait_seconds`) for its exit code and the end of its output. |
+| `start_session` | Start a long-running or interactive command and return its `session_id`. |
+| `send_input`, `read_output` | Write to stdin; read output from `from_seq`, waiting for new output if asked. |
+| `send_signal`, `kill_session`, `list_sessions` | Control and list sessions. |
+| `list_templates`, `run_template`, `get_job` | Use templates and follow the jobs they start. |
+
 ## Security
 
 shhttp exists to run commands, so treat access to it like shell access.
@@ -350,7 +378,10 @@ The image also contains the `shhttp` client.
 
 ```sh
 go test -race ./...
+go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 ```
+
+Releases are built by [GoReleaser](https://goreleaser.com) when a `v*` tag is pushed (`.goreleaser.yaml`, `.github/workflows/release.yml`).
 
 `docs/openapi.yaml` must match the code; a test fails when it does not. After changing an endpoint or an API type, regenerate it:
 

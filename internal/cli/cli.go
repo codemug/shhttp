@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/codemug/shhttp/pkg/api"
-	"github.com/codemug/shhttp/pkg/client"
+	"github.com/codemug/shhttp/v2/internal/mcpserver"
+	"github.com/codemug/shhttp/v2/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/client"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Version is the client version, set by the shhttp command.
@@ -61,6 +63,7 @@ Keys (use the master key):
   key ls | key get <id> | key rotate [-grace D] <id> | key revoke [-kill-sessions] <id>
 
 Other:
+  mcp                                  serve these operations as MCP tools on stdin/stdout, for AI agents
   whoami                               describe the key in use
   version                              print client and server versions
 
@@ -120,6 +123,7 @@ func Main(ctx context.Context, args []string, env Env) int {
 		"job":      a.jobCmd,
 		"queue":    a.queueCmd,
 		"template": a.templateCmd,
+		"mcp":      a.mcp,
 		"whoami":   a.whoami,
 		"version":  a.version,
 	}
@@ -289,4 +293,18 @@ func (a *app) version(args []string) error {
 	}
 	fmt.Fprintf(a.env.Stdout, "server %s\n", v)
 	return nil
+}
+
+func (a *app) mcp(args []string) error {
+	fs := a.flags("mcp", "")
+	if err := parse(fs, args, 0, 0); err != nil {
+		return err
+	}
+	in, inOK := a.env.Stdin.(io.ReadCloser)
+	out, outOK := a.env.Stdout.(io.WriteCloser)
+	if !inOK || !outOK {
+		return errors.New("mcp needs real stdin and stdout")
+	}
+	server := mcpserver.New(a.client(), Version)
+	return server.Run(a.ctx, &mcpsdk.IOTransport{Reader: in, Writer: out})
 }

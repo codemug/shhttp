@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/codemug/shhttp/internal/auth"
-	"github.com/codemug/shhttp/internal/config"
-	"github.com/codemug/shhttp/internal/job"
-	"github.com/codemug/shhttp/internal/server"
-	"github.com/codemug/shhttp/internal/session"
-	"github.com/codemug/shhttp/internal/store"
-	"github.com/codemug/shhttp/internal/template"
+	"github.com/codemug/shhttp/v2/internal/auth"
+	"github.com/codemug/shhttp/v2/internal/config"
+	"github.com/codemug/shhttp/v2/internal/job"
+	"github.com/codemug/shhttp/v2/internal/server"
+	"github.com/codemug/shhttp/v2/internal/session"
+	"github.com/codemug/shhttp/v2/internal/store"
+	"github.com/codemug/shhttp/v2/internal/template"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

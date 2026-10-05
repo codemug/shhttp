@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/codemug/shhttp/internal/session"
-	"github.com/codemug/shhttp/internal/store"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/session"
+	"github.com/codemug/shhttp/v2/internal/store"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 type env struct {

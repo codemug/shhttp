@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 const jobColumns = `id, key_id, spec, queue, state, steps, error, created_at, started_at, ended_at, expires_at`

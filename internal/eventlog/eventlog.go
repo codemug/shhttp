@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 const (

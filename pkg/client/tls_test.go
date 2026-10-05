@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/codemug/shhttp/internal/config"
-	"github.com/codemug/shhttp/pkg/api"
-	"github.com/codemug/shhttp/pkg/client"
+	"github.com/codemug/shhttp/v2/internal/config"
+	"github.com/codemug/shhttp/v2/pkg/api"
+	"github.com/codemug/shhttp/v2/pkg/client"
 )
 
 // writeCert creates a certificate signed by parent (self-signed when nil)

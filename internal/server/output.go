@@ -5,8 +5,8 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/codemug/shhttp/internal/eventlog"
-	"github.com/codemug/shhttp/pkg/api"
+	"github.com/codemug/shhttp/v2/internal/eventlog"
+	"github.com/codemug/shhttp/v2/pkg/api"
 )
 
 // collectOutput gathers the stdout and stderr written so far, keeping at
