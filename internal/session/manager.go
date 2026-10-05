@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -203,6 +204,14 @@ func (m *Manager) prepare(spec *api.SessionSpec, owner Owner) (prepared, error) 
 		p.stdin = []byte(spec.Stdin)
 	}
 	return p, nil
+}
+
+// Validate checks spec against the owner's policy without starting
+// anything. Errors are *InvalidError or *policy.DeniedError.
+func (m *Manager) Validate(owner Owner, spec api.SessionSpec) error {
+	spec.Env = maps.Clone(spec.Env)
+	_, err := m.prepare(&spec, owner)
+	return err
 }
 
 // Create validates spec, records the session and starts its process. A

@@ -2,7 +2,7 @@
 
 shhttp runs commands on the machine it is installed on and streams their output to any HTTP client. Clients can send stdin while the command runs, send signals, disconnect, and come back later to replay the output from any point.
 
-> **Status:** v2 is being rebuilt from scratch on the `v2` branch. Sessions, streaming over HTTP and WebSocket, stdin, API keys, a CLI and a Go client library work today; jobs, templates and terminal (TTY) support are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. v1 has been removed; its last version is on the `master` branch.
+> **Status:** v2 is being rebuilt from scratch on the `v2` branch. Sessions, streaming over HTTP and WebSocket, stdin, jobs, queues, templates, API keys, a CLI and a Go client library work today; terminal (TTY) support and hardening are next. See [docs/v2-design.md](docs/v2-design.md) for the full design and its implementation status. v1 has been removed; its last version is on the `master` branch.
 
 ## Concepts
 
@@ -28,7 +28,7 @@ On first start the server generates a master key and writes it to `shhttp-data/m
 ```sh
 export SHHTTP_URL=http://127.0.0.1:2112
 export SHHTTP_MASTER_KEY=$(cat shhttp-data/master.key)
-export SHHTTP_KEY=$(./shhttp key create -name me -scope sessions:run,sessions:read -q)
+export SHHTTP_KEY=$(./shhttp key create -name me -scope sessions:run,sessions:read,jobs:run,jobs:read,templates:run,templates:read,templates:write -q)
 
 ./shhttp run uname -a
 printf 'c\na\nb\n' | ./shhttp run sort      # local stdin streams to the remote process
@@ -133,6 +133,14 @@ All endpoints except `/healthz`, `/v2/version` and the API description need `Aut
 | `DELETE /v2/sessions/{id}` | `sessions:run` | Kill if needed, then delete the session and its output. |
 | `GET /v2/exec` | `sessions:run` | WebSocket: start a session and exchange stdin, signals and events on one connection. |
 | `GET /v2/sessions/{id}/attach` | `sessions:read` | WebSocket: replay a session from `from`, then follow it. Sending input needs `sessions:run`; `readonly=true` only watches. |
+| `POST /v2/jobs` | `jobs:run` | Submit a job: steps in order, or a dependency graph with `depends_on`. |
+| `GET /v2/jobs`, `GET /v2/jobs/{id}`, `GET /v2/jobs/{id}/events` | `jobs:read` | List jobs, get one, read or follow its events. |
+| `POST /v2/jobs/{id}/cancel`, `DELETE /v2/jobs/{id}` | `jobs:run` | Cancel a job; delete it with its step sessions. |
+| `GET /v2/queues` | `jobs:read` | Queues with their concurrency, running and queued counts. |
+| `PUT /v2/queues/{name}`, `DELETE /v2/queues/{name}` | `queues:write` | `{"concurrency": 2}` creates or resizes a queue. |
+| `GET /v2/templates`, `GET /v2/templates/{name}` | `templates:read` or `templates:run` | List and read templates. |
+| `PUT /v2/templates/{name}`, `DELETE /v2/templates/{name}` | `templates:write` | Save or delete a template. |
+| `POST /v2/templates/{name}/run` | `templates:run` | `{"params": {…}}` starts the template's session or job. |
 | `GET /v2/whoami` | any key | The calling key, its scopes and policy. |
 | `POST /v2/keys`, `GET /v2/keys`, `GET/PATCH/DELETE /v2/keys/{id}`, `POST /v2/keys/{id}/rotate` | master key | Manage API keys. `DELETE` revokes; add `?kill_sessions=true` to also kill the key's running sessions. `rotate` accepts `{"grace": "1h"}` to keep the old secret working for a while. |
 
@@ -191,6 +199,61 @@ for e, err := range c.Events(ctx, id, &client.EventsOptions{Follow: true}) { …
 
 Errors from the server are `*api.Problem` values (`client.IsStatus(err, 404)`); rejected WebSocket messages are `*client.ProtocolError`.
 
+### Jobs and queues
+
+A job is a list of steps; each step runs as a session. Steps run one after another, or, as soon as any step sets `depends_on`, as a dependency graph where independent steps run in parallel.
+
+```jsonc
+POST /v2/jobs
+{
+  "name": "deploy",
+  "queue": "deploys",                       // optional: wait for a slot in this queue
+  "env": {"STAGE": "prod"},                 // added to every step
+  "on_restart": "resume",                   // after a server restart: "fail" (default) or re-run interrupted steps
+  "steps": [
+    {"name": "fetch", "spec": {"argv": ["git", "pull"]}},
+    {"name": "build", "spec": {"argv": ["make"]}, "depends_on": ["fetch"]},
+    {"name": "lint",  "spec": {"argv": ["make", "lint"]}, "depends_on": ["fetch"], "allow_failure": true},
+    {"name": "ship",  "spec": {"shell": "./ship.sh"}, "depends_on": ["build", "lint"]}
+  ]
+}
+```
+
+When a step fails, no further steps start and the job fails (unless the step has `allow_failure`). Every step is checked against the key's policy when the job is submitted. A step's output is its session's output: the job lists each step's `session_id`.
+
+Queues limit how many of their jobs run at once; jobs start in submission order. The `default` queue has a concurrency of 1.
+
+```sh
+./shhttp queue set deploys 2
+./shhttp job submit -w < deploy.json      # prints progress, exits 0 if the job succeeded
+./shhttp job logs job_…                   # every step's output
+```
+
+### Templates
+
+A template is a saved session or job with typed parameters, so that keys can be allowed to run approved commands without writing their own:
+
+```jsonc
+PUT /v2/templates/deploy
+{
+  "description": "Deploy a branch",
+  "params": {
+    "branch": {"pattern": "[a-z0-9/._-]+", "default": "main"},
+    "retries": {"type": "int", "default": "3"}
+  },
+  "session": {"argv": ["./deploy.sh", "--branch={{branch}}", "--retries", "{{retries}}"]}
+}
+
+POST /v2/templates/deploy/run   {"params": {"branch": "release/2"}}
+```
+
+`{{name}}` is replaced in argv elements, env values and cwd, never in `shell` command lines (a template that tries is rejected). Every session started from a template gets each parameter as `SHHTTP_PARAM_<NAME>`, which is how shell command lines use them safely: `"shell": "git checkout \"$SHHTTP_PARAM_BRANCH\""`. A key with only the `templates:run` scope can start sessions and jobs only through templates, and its policy's `templates` list can narrow which ones.
+
+```sh
+./shhttp template put deploy < deploy-template.json
+./shhttp template run -p branch=release/2 deploy    # attaches to the session (or watches the job)
+```
+
 ### Session spec
 
 ```jsonc
@@ -224,7 +287,8 @@ POST /v2/keys
     "cwd_roots": ["/srv/build"],            // the first is the default working directory
     "env_allow": ["CI_.*"],
     "max_timeout": "30m",
-    "max_concurrent_sessions": 4
+    "max_concurrent_sessions": 4,
+    "templates": ["deploy"]                 // with templates:run: only these templates
   }
 }
 ```

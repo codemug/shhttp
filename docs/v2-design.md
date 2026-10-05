@@ -203,9 +203,10 @@ POST /v2/keys            (Authorization: Bearer <master key>)
 |---|---|
 | `sessions:run` | Create sessions, write stdin, send signals, resize |
 | `sessions:read` | List and read sessions and their events |
-| `jobs:run`, `jobs:read` | Same split for jobs and queues |
-| `templates:run` | Run templates only (a key can be limited to "run these approved templates") |
-| `templates:write`, `templates:read` | Manage templates |
+| `jobs:run`, `jobs:read` | Submit, cancel and delete jobs / read jobs, their events and queues |
+| `queues:write` | Create, resize and delete queues |
+| `templates:run` | Run templates (and list them). A key with only this scope can start sessions and jobs only through templates; policy `templates` narrows which |
+| `templates:write`, `templates:read` | Create and delete templates / read them |
 | `admin:read` | See all keys' sessions and jobs, read metrics |
 
 By default a key sees only the sessions and jobs it created. `admin:read` lifts that for reading; no key can write to another key's sessions.
@@ -247,14 +248,18 @@ POST /v2/jobs
 }
 ```
 
-- Without `depends_on`, steps run in order (v1 behaviour). With it, independent steps run in parallel (v1 roadmap item).
-- Each step's session ID is in the job record, so its output is read through the normal session endpoints.
-- Job states: `queued → running → succeeded | failed | cancelled | lost`. Step states record which ones were skipped because a dependency failed.
-- Stdin can be sent to a running step via its session.
+- Without `depends_on`, steps run in order (v1 behaviour). With it, independent steps run in parallel (v1 roadmap item). Unknown dependencies and cycles are rejected at submission.
+- Every step is checked against the submitting key's policy at submission, and runs with the key's policy as it is when the step starts. A key revoked or expired meanwhile makes its next step fail.
+- When a step fails (and is not `allow_failure`), no further steps start; steps already running finish; the rest are `skipped` and the job is `failed`.
+- Each step runs as a session labelled `shhttp.job=<id>` and `shhttp.step=<name>`. Its session ID is in the job record, so its output (and stdin) go through the normal session endpoints.
+- Job states: `queued → running → succeeded | failed | cancelled | lost`. Step states: `pending, running, succeeded, failed, skipped, cancelled`.
+- `GET /v2/jobs/{id}/events` streams `job_started`, `step_started`, `step_finished` and `job_finished` events in the same formats as session events.
+- Cancelling kills the running steps (marked `cancelled`). Deleting a job also deletes its step sessions.
+- On a clean shutdown jobs stop starting steps before sessions are killed, so the interrupted steps are left for `on_restart`: `fail` marks the job `lost`, `resume` re-runs the interrupted steps and continues.
 
 ### Queues
 
-Named, persistent, with `concurrency` (default `1`, matching v1's serial queue). Jobs in a queue start in submission order. `default` always exists.
+Named, persistent, with `concurrency` (default `1`, matching v1's serial queue). Jobs in a queue start in submission order. `default` always exists and cannot be deleted; other queues can be deleted when empty. `GET /v2/queues` shows each queue's running and queued counts.
 
 ### Templates
 
@@ -270,9 +275,10 @@ PUT /v2/templates/deploy
 POST /v2/templates/deploy/run  {"params": {"branch": "release/2.0"}}
 ```
 
-- Placeholders may appear only in whole `argv` elements, `env` values and `cwd`. They are **never substituted into `shell` strings**; shell templates receive parameters as environment variables (`$SHHTTP_PARAM_BRANCH`) instead, which removes shell injection through parameters.
+- `{{name}}` placeholders are replaced inside `argv` elements (for example `"--branch={{branch}}"`), `env` values, `cwd` and the job's `env`. They are **never substituted into `shell` strings**, and a template that tries is rejected; every rendered session gets each parameter as an environment variable (`$SHHTTP_PARAM_BRANCH`) instead, which removes shell injection through parameters. Placeholders that name no declared parameter are rejected when the template is saved.
 - Parameters are validated (type, pattern, enum) before anything runs.
-- A template holds either a single session spec or a job.
+- A template holds either a single session spec or a job. Running it returns `{"session": …}` or `{"job": …}`; sessions and jobs started from a template carry the label `shhttp.template=<name>`.
+- Templates are shared by all keys. Each run happens under the calling key and its policy.
 
 ## Storage
 
@@ -350,13 +356,15 @@ Dependencies kept small: `github.com/danielgtaylor/huma/v2`, `github.com/coder/w
 
 ## Implementation status
 
-Phases 1 and 2 are implemented.
+Phases 1, 2 and 3 are implemented.
 
 Phase 1: config (YAML, env, flags), SQLite store, master key and the keys API (create, list, get, update, rotate with grace, revoke with optional `kill_sessions`), scopes and key policies (enforced already, ahead of phase 4: `allow_shell`, `commands`, `cwd_roots`, `env_allow`, `max_timeout`, `max_concurrent_sessions`), the session engine, all session HTTP endpoints with NDJSON, SSE and raw streaming, `wait=true`, the retention sweeper, an audit log and graceful shutdown. The HTTP API runs on huma and publishes its OpenAPI document.
 
+Phase 3: jobs (sequential or dependency graph, `allow_failure`, cancel, `on_restart`), job events, queues, templates with typed parameters, and their client and CLI commands.
+
 Phase 2: the WebSocket `exec` and `attach` endpoints with `on_disconnect`, browser authentication through the subprotocol and origin checks; the Go client library; the CLI.
 
-Not yet implemented from this document: `?lines=true`, TTY, `run_as`, `max_output_bytes` and `templates` policies, jobs, queues, templates, metrics, client certificates, rate limiting, the MCP mode.
+Not yet implemented from this document: `?lines=true`, TTY, `run_as` and `max_output_bytes` policies, metrics, client certificates, rate limiting, the MCP mode.
 
 ## Decisions
 

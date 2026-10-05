@@ -17,9 +17,11 @@ import (
 
 	"github.com/codemug/shhttp/internal/auth"
 	"github.com/codemug/shhttp/internal/config"
+	"github.com/codemug/shhttp/internal/job"
 	"github.com/codemug/shhttp/internal/server"
 	"github.com/codemug/shhttp/internal/session"
 	"github.com/codemug/shhttp/internal/store"
+	"github.com/codemug/shhttp/internal/template"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -108,6 +110,13 @@ func run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	jobs, err := job.New(job.Config{DataDir: cfg.DataDir, DefaultRetention: cfg.DefaultRetention, Logger: logger}, st, sessions, authn.Policy)
+	if err != nil {
+		return err
+	}
+	if err := jobs.Start(ctx); err != nil {
+		return fmt.Errorf("resuming jobs: %w", err)
+	}
 
 	go func() {
 		t := time.NewTicker(cfg.SweepInterval)
@@ -117,6 +126,7 @@ func run(cfg config.Config) error {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
+				jobs.Sweep(ctx, now)
 				sessions.Sweep(ctx, now)
 			}
 		}
@@ -127,8 +137,9 @@ func run(cfg config.Config) error {
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(authn, sessions, logger, server.Options{Version: version, AllowedOrigins: cfg.AllowedOrigins}).Handler(),
+		Addr: cfg.Listen,
+		Handler: server.New(server.Deps{Auth: authn, Sessions: sessions, Jobs: jobs, Templates: template.NewService(st)},
+			logger, server.Options{Version: version, AllowedOrigins: cfg.AllowedOrigins}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
@@ -162,8 +173,14 @@ func run(cfg config.Config) error {
 	defer cancel()
 	httpDone := make(chan error, 1)
 	go func() { httpDone <- srv.Shutdown(shutdownCtx) }()
+	// Jobs stop first so that steps killed by the shutdown are left for
+	// on_restart instead of counting as failures.
+	jobs.Stop()
 	if err := sessions.Shutdown(shutdownCtx); err != nil {
 		logger.Error("sessions did not stop in time", "err", err)
+	}
+	if err := jobs.Wait(shutdownCtx); err != nil {
+		logger.Error("jobs did not stop in time", "err", err)
 	}
 	cancelBase()
 	if err := <-httpDone; err != nil && !errors.Is(err, context.DeadlineExceeded) {

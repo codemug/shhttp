@@ -96,6 +96,25 @@ func Open(path string) (*Log, error) {
 	return l, nil
 }
 
+// OpenAppend opens an existing log to append more events, for example the
+// log of a job resumed after a restart.
+func OpenAppend(path string) (*Log, error) {
+	l, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Truncate(l.size); err != nil { // drop a torn last line
+		f.Close()
+		return nil, err
+	}
+	l.w, l.closed = f, false
+	return l, nil
+}
+
 // Path returns the log's file path.
 func (l *Log) Path() string { return l.path }
 

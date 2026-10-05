@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/codemug/shhttp/internal/auth"
+	"github.com/codemug/shhttp/internal/job"
 	"github.com/codemug/shhttp/internal/session"
 	"github.com/codemug/shhttp/internal/store"
+	"github.com/codemug/shhttp/internal/template"
 	"github.com/codemug/shhttp/pkg/api"
 )
 
@@ -43,9 +45,19 @@ func newServer(t *testing.T) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(New(a, m, logger, Options{Version: "test"}).Handler())
+	jobs, err := job.New(job.Config{DataDir: dir, Logger: logger}, st, m, a.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deps := Deps{Auth: a, Sessions: m, Jobs: jobs, Templates: template.NewService(st)}
+	ts := httptest.NewServer(New(deps, logger, Options{Version: "test"}).Handler())
 	t.Cleanup(func() {
+		jobs.Stop()
 		m.Shutdown(context.Background())
+		jobs.Wait(context.Background())
 		ts.Close()
 		st.Close()
 	})

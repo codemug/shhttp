@@ -10,13 +10,16 @@ import (
 	"net/http"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/codemug/shhttp/internal/auth"
+	"github.com/codemug/shhttp/internal/job"
 	"github.com/codemug/shhttp/internal/policy"
 	"github.com/codemug/shhttp/internal/session"
 	"github.com/codemug/shhttp/internal/store"
+	"github.com/codemug/shhttp/internal/template"
 	"github.com/codemug/shhttp/pkg/api"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -50,20 +53,33 @@ type Options struct {
 	AllowedOrigins []string
 }
 
+// Deps are the services the server exposes.
+type Deps struct {
+	Auth      *auth.Authenticator
+	Sessions  *session.Manager
+	Jobs      *job.Runner
+	Templates *template.Service
+}
+
 // Server serves the v2 API.
 type Server struct {
-	auth     *auth.Authenticator
-	sessions *session.Manager
-	log      *slog.Logger
-	opts     Options
-	mux      *http.ServeMux
-	api      huma.API
-	attached *attachments
+	auth      *auth.Authenticator
+	sessions  *session.Manager
+	jobs      *job.Runner
+	templates *template.Service
+	log       *slog.Logger
+	opts      Options
+	mux       *http.ServeMux
+	api       huma.API
+	attached  *attachments
 }
 
 // New returns a Server.
-func New(a *auth.Authenticator, m *session.Manager, logger *slog.Logger, opts Options) *Server {
-	s := &Server{auth: a, sessions: m, log: logger, opts: opts, mux: http.NewServeMux(), attached: newAttachments()}
+func New(d Deps, logger *slog.Logger, opts Options) *Server {
+	s := &Server{
+		auth: d.Auth, sessions: d.Sessions, jobs: d.Jobs, templates: d.Templates,
+		log: logger, opts: opts, mux: http.NewServeMux(), attached: newAttachments(),
+	}
 
 	config := huma.DefaultConfig("shhttp", APIVersion)
 	config.Info.Description = "Run commands remotely, stream their output and send them input. " +
@@ -89,12 +105,14 @@ func New(a *auth.Authenticator, m *session.Manager, logger *slog.Logger, opts Op
 	s.registerKeys()
 	s.registerSessions()
 	s.registerWebSocket()
+	s.registerJobs()
+	s.registerTemplates()
 	return s
 }
 
 // OpenAPIYAML returns the OpenAPI document without starting a server.
 func OpenAPIYAML() ([]byte, error) {
-	return New(nil, nil, slog.New(slog.DiscardHandler), Options{}).api.OpenAPI().YAML()
+	return New(Deps{}, slog.New(slog.DiscardHandler), Options{}).api.OpenAPI().YAML()
 }
 
 // Handler returns the HTTP handler with logging, panic recovery and
@@ -179,10 +197,11 @@ func writeProblem(w http.ResponseWriter, status int, detail string) {
 // access is the credential an operation requires. It is stored in the
 // operation's metadata and checked by authenticate.
 type access struct {
-	public    bool   // no credential
-	master    bool   // the master key
-	scope     string // an API key holding this scope; "" means any credential
-	websocket bool   // the key may also arrive as a WebSocket subprotocol
+	public    bool     // no credential
+	master    bool     // the master key
+	scope     string   // an API key holding this scope; "" means any credential
+	anyOf     []string // an API key holding at least one of these scopes
+	websocket bool     // the key may also arrive as a WebSocket subprotocol
 }
 
 const accessKey = "access"
@@ -243,11 +262,14 @@ func (s *Server) authenticate(ctx huma.Context, next func(huma.Context)) {
 	case a.master && !p.Master:
 		huma.WriteErr(s.api, ctx, http.StatusForbidden, "only the master key can manage API keys")
 		return
-	case a.scope != "" && p.Master:
+	case (a.scope != "" || len(a.anyOf) > 0) && p.Master:
 		huma.WriteErr(s.api, ctx, http.StatusForbidden, "the master key can only manage API keys; create an API key to use this endpoint")
 		return
 	case a.scope != "" && !p.Has(a.scope):
 		huma.WriteErr(s.api, ctx, http.StatusForbidden, "this key lacks the "+a.scope+" scope")
+		return
+	case len(a.anyOf) > 0 && !slices.ContainsFunc(a.anyOf, p.Has):
+		huma.WriteErr(s.api, ctx, http.StatusForbidden, "this key needs one of the scopes "+strings.Join(a.anyOf, ", "))
 		return
 	}
 	next(huma.WithValue(ctx, principalKey{}, p))
@@ -300,21 +322,27 @@ func (s *Server) apiError(err error) error {
 		keyInvalid  *auth.InvalidError
 		denied      *policy.DeniedError
 		limit       *session.LimitError
+		jobInvalid  *job.InvalidError
+		tplInvalid  *template.InvalidError
 		statusErr   huma.StatusError
 	)
 	switch {
 	case errors.As(err, &statusErr):
 		return err
-	case errors.Is(err, session.ErrNotFound), errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, session.ErrNotFound), errors.Is(err, store.ErrNotFound),
+		errors.Is(err, job.ErrNotFound), errors.Is(err, template.ErrNotFound):
 		return huma.Error404NotFound("not found")
-	case errors.Is(err, session.ErrNotRunning), errors.Is(err, session.ErrStdinClosed), errors.Is(err, auth.ErrRevoked):
+	case errors.Is(err, session.ErrNotRunning), errors.Is(err, session.ErrStdinClosed), errors.Is(err, auth.ErrRevoked),
+		errors.Is(err, job.ErrFinished), errors.Is(err, job.ErrQueueInUse):
 		return huma.Error409Conflict(err.Error())
-	case errors.As(err, &sessInvalid), errors.As(err, &keyInvalid):
+	case errors.As(err, &sessInvalid), errors.As(err, &keyInvalid), errors.As(err, &jobInvalid), errors.As(err, &tplInvalid):
 		return huma.Error400BadRequest(err.Error())
 	case errors.As(err, &denied):
 		return huma.Error403Forbidden(err.Error())
 	case errors.As(err, &limit):
 		return huma.Error429TooManyRequests(err.Error())
+	case errors.Is(err, auth.ErrKeyInactive):
+		return huma.Error403Forbidden(err.Error())
 	case errors.Is(err, session.ErrShuttingDown):
 		return huma.Error503ServiceUnavailable(err.Error())
 	case errors.Is(err, context.Canceled):

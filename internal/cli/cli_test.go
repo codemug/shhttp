@@ -33,7 +33,7 @@ func newHarness(t *testing.T) *harness {
 		"SHHTTP_URL":        srv.URL,
 		"SHHTTP_MASTER_KEY": srv.MasterKey,
 	}}
-	r := h.run("", "key", "create", "-name", "cli", "-scope", "sessions:run,sessions:read", "-q")
+	r := h.run("", "key", "create", "-name", "cli", "-scope", strings.Join(api.AllScopes, ","), "-q")
 	if r.code != 0 {
 		t.Fatalf("key create: %+v", r)
 	}
@@ -247,5 +247,82 @@ func TestInterruptStopsNonInteractiveCommands(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("logs -f ignored the interrupt")
+	}
+}
+
+func TestJobCommands(t *testing.T) {
+	h := newHarness(t)
+	spec := `{"name": "ci", "steps": [
+		{"name": "build", "spec": {"shell": "echo building"}},
+		{"name": "test", "spec": {"shell": "echo testing; exit 2"}}
+	]}`
+	r := h.run(spec, "job", "submit", "-w")
+	if r.code != 1 || !strings.Contains(r.stdout, "build                succeeded (exit 0)") || !strings.Contains(r.stdout, "test                 failed (exit 2)") {
+		t.Fatalf("job submit -w: %+v", r)
+	}
+	r = h.run("", "job", "ls")
+	if !strings.Contains(r.stdout, "failed") || !strings.Contains(r.stdout, "2/2") {
+		t.Fatalf("job ls: %+v", r)
+	}
+	var jobs []api.Job
+	json.Unmarshal([]byte(h.run("", "job", "ls", "-json").stdout), &jobs)
+	id := jobs[0].ID
+	r = h.run("", "job", "logs", id)
+	if r.stdout != "==> build (succeeded)\nbuilding\n==> test (failed)\ntesting\n" {
+		t.Fatalf("job logs: %q", r.stdout)
+	}
+	if r := h.run("", "job", "logs", "-step", "test", id); r.stdout != "testing\n" {
+		t.Fatalf("job logs -step: %q", r.stdout)
+	}
+	if r := h.run(`{"steps": [{"spec": {"argv": ["sleep", "30"]}}]}`, "job", "submit"); !strings.HasPrefix(r.stdout, "job_") {
+		t.Fatalf("job submit: %+v", r)
+	} else {
+		id := strings.TrimSpace(r.stdout)
+		if r := h.run("", "job", "cancel", id); !strings.Contains(r.stdout, "cancelled") {
+			t.Fatalf("job cancel: %+v", r)
+		}
+		if r := h.run("", "job", "rm", id); r.code != 0 {
+			t.Fatalf("job rm: %+v", r)
+		}
+	}
+	if r := h.run("{bad json", "job", "submit"); r.code != 1 {
+		t.Fatalf("bad JSON: %+v", r)
+	}
+}
+
+func TestQueueAndTemplateCommands(t *testing.T) {
+	h := newHarness(t)
+	if r := h.run("", "queue", "set", "deploys", "3"); r.code != 0 {
+		t.Fatalf("queue set: %+v", r)
+	}
+	if r := h.run("", "queue", "ls"); !strings.Contains(r.stdout, "deploys  3") {
+		t.Fatalf("queue ls: %+v", r)
+	}
+	if r := h.run("", "queue", "rm", "deploys"); r.code != 0 {
+		t.Fatalf("queue rm: %+v", r)
+	}
+
+	tpl := `{"description": "greet someone", "params": {"who": {"pattern": "[a-z]+"}},
+		"session": {"argv": ["echo", "hello {{who}}"]}}`
+	if r := h.run(tpl, "template", "put", "greet"); r.code != 0 {
+		t.Fatalf("template put: %+v", r)
+	}
+	if r := h.run("", "template", "ls"); !strings.Contains(r.stdout, "greet  session  who") {
+		t.Fatalf("template ls: %+v", r)
+	}
+	r := h.run("", "template", "run", "-n", "-p", "who=ada", "greet")
+	if r.code != 0 || r.stdout != "hello ada\n" {
+		t.Fatalf("template run: %+v", r)
+	}
+	if r := h.run("", "template", "run", "-p", "who=A!", "greet"); r.code != 1 || !strings.Contains(r.stderr, "does not match") {
+		t.Fatalf("bad parameter: %+v", r)
+	}
+	jobTpl := `{"job": {"steps": [{"spec": {"argv": ["true"]}}]}}`
+	h.run(jobTpl, "template", "put", "noop")
+	if r := h.run("", "template", "run", "noop"); r.code != 0 || !strings.Contains(r.stdout, "succeeded") {
+		t.Fatalf("job template run: %+v", r)
+	}
+	if r := h.run("", "template", "rm", "greet"); r.code != 0 {
+		t.Fatalf("template rm: %+v", r)
 	}
 }

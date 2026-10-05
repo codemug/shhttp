@@ -152,6 +152,9 @@ type Event struct {
 	DurationMS *int64       `json:"duration_ms,omitempty"`
 	// error
 	Error string `json:"error,omitempty"`
+	// job events
+	Step      string `json:"step,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type eventJSON struct {
@@ -239,13 +242,22 @@ type SessionList struct {
 
 // Scopes an API key can hold.
 const (
-	ScopeSessionsRun  = "sessions:run"
-	ScopeSessionsRead = "sessions:read"
-	ScopeAdminRead    = "admin:read"
+	ScopeSessionsRun    = "sessions:run"
+	ScopeSessionsRead   = "sessions:read"
+	ScopeJobsRun        = "jobs:run"
+	ScopeJobsRead       = "jobs:read"
+	ScopeQueuesWrite    = "queues:write"
+	ScopeTemplatesRun   = "templates:run"
+	ScopeTemplatesRead  = "templates:read"
+	ScopeTemplatesWrite = "templates:write"
+	ScopeAdminRead      = "admin:read"
 )
 
-// AllScopes lists every scope the server currently understands.
-var AllScopes = []string{ScopeSessionsRun, ScopeSessionsRead, ScopeAdminRead}
+// AllScopes lists every scope the server understands.
+var AllScopes = []string{
+	ScopeSessionsRun, ScopeSessionsRead, ScopeJobsRun, ScopeJobsRead, ScopeQueuesWrite,
+	ScopeTemplatesRun, ScopeTemplatesRead, ScopeTemplatesWrite, ScopeAdminRead,
+}
 
 // Policy restricts what sessions an API key may start. Empty fields impose
 // no restriction.
@@ -266,6 +278,8 @@ type Policy struct {
 	MaxTimeout Duration `json:"max_timeout,omitempty" doc:"Maximum session timeout, also used when none is given." example:"30m"`
 	// MaxConcurrentSessions caps how many sessions of this key run at once.
 	MaxConcurrentSessions int `json:"max_concurrent_sessions,omitempty" minimum:"0" doc:"Maximum running sessions for this key."`
+	// Templates limits templates:run to these templates.
+	Templates []string `json:"templates,omitempty" doc:"Templates this key may run. Empty means all."`
 }
 
 // ShellAllowed reports whether the policy permits shell sessions. Shell is
@@ -289,7 +303,7 @@ type Key struct {
 // CreateKeyRequest is the body of POST /v2/keys.
 type CreateKeyRequest struct {
 	Name      string   `json:"name" minLength:"1" maxLength:"100" example:"ci-runner"`
-	Scopes    []string `json:"scopes" minItems:"1" enum:"sessions:run,sessions:read,admin:read" example:"[\"sessions:run\", \"sessions:read\"]"`
+	Scopes    []string `json:"scopes" minItems:"1" enum:"sessions:run,sessions:read,jobs:run,jobs:read,queues:write,templates:run,templates:read,templates:write,admin:read" example:"[\"sessions:run\", \"sessions:read\"]"`
 	Policy    Policy   `json:"policy,omitzero"`
 	ExpiresIn Duration `json:"expires_in,omitempty" doc:"The key stops working after this long." example:"720h"`
 }
@@ -298,7 +312,7 @@ type CreateKeyRequest struct {
 // left unchanged.
 type UpdateKeyRequest struct {
 	Name   *string   `json:"name,omitempty"`
-	Scopes *[]string `json:"scopes,omitempty" enum:"sessions:run,sessions:read,admin:read"`
+	Scopes *[]string `json:"scopes,omitempty" enum:"sessions:run,sessions:read,jobs:run,jobs:read,queues:write,templates:run,templates:read,templates:write,admin:read"`
 	Policy *Policy   `json:"policy,omitempty"`
 	// ExpiresAt sets a new expiry. Use ClearExpiry to remove it.
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`

@@ -49,6 +49,34 @@ var migrations = []string{
 	CREATE INDEX sessions_key ON sessions (key_id, id);
 	CREATE INDEX sessions_state ON sessions (state);
 	CREATE INDEX sessions_expires ON sessions (expires_at);`,
+	`CREATE TABLE jobs (
+		id          TEXT PRIMARY KEY,
+		key_id      TEXT NOT NULL,
+		spec        TEXT NOT NULL,
+		queue       TEXT NOT NULL DEFAULT '',
+		state       TEXT NOT NULL,
+		steps       TEXT NOT NULL,
+		error       TEXT NOT NULL DEFAULT '',
+		created_at  INTEGER NOT NULL,
+		started_at  INTEGER,
+		ended_at    INTEGER,
+		expires_at  INTEGER
+	);
+	CREATE INDEX jobs_key ON jobs (key_id, id);
+	CREATE INDEX jobs_state ON jobs (state, queue, id);
+	CREATE INDEX jobs_expires ON jobs (expires_at);
+	CREATE TABLE queues (
+		name        TEXT PRIMARY KEY,
+		concurrency INTEGER NOT NULL
+	);
+	INSERT INTO queues (name, concurrency) VALUES ('default', 1);
+	CREATE TABLE templates (
+		name        TEXT PRIMARY KEY,
+		spec        TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		updated_at  INTEGER NOT NULL,
+		updated_by  TEXT NOT NULL
+	);`,
 }
 
 // Store is the database handle.

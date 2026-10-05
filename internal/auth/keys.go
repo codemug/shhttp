@@ -187,3 +187,22 @@ func (a *Authenticator) RevokeKey(ctx context.Context, keyID string) (api.Key, e
 	}
 	return k.Key, nil
 }
+
+// ErrKeyInactive is returned by Policy for a revoked, expired or deleted key.
+var ErrKeyInactive = errors.New("the key that owns this job is revoked or expired")
+
+// Policy returns the current policy of an active key. Jobs use it to start
+// each step with the key's policy at that moment.
+func (a *Authenticator) Policy(ctx context.Context, keyID string) (api.Policy, error) {
+	k, err := a.store.GetKey(ctx, keyID)
+	if errors.Is(err, store.ErrNotFound) {
+		return api.Policy{}, ErrKeyInactive
+	}
+	if err != nil {
+		return api.Policy{}, err
+	}
+	if k.RevokedAt != nil || (k.ExpiresAt != nil && !a.now().Before(*k.ExpiresAt)) {
+		return api.Policy{}, ErrKeyInactive
+	}
+	return k.Policy, nil
+}

@@ -121,17 +121,19 @@ type signalInput struct {
 // Event documents the JSON form of api.Event, which has a custom encoder, in
 // the OpenAPI document. It is not used at run time.
 type Event struct {
-	Seq        uint64           `json:"seq" doc:"Sequence number, starting at 1 with no gaps."`
-	Time       time.Time        `json:"time"`
-	Type       api.EventType    `json:"type" enum:"started,stdout,stderr,stdin_closed,signal,exit,error"`
-	Data       string           `json:"data,omitempty" doc:"stdout and stderr: the output chunk, when it is valid UTF-8."`
-	DataB64    []byte           `json:"data_b64,omitempty" doc:"stdout and stderr: the output chunk, when it is not valid UTF-8."`
-	PID        int              `json:"pid,omitempty" doc:"started: the process id."`
-	Signal     string           `json:"signal,omitempty" doc:"signal: the signal sent. exit: the signal that ended the process."`
-	State      api.SessionState `json:"state,omitempty" doc:"exit: the final session state."`
-	ExitCode   *int             `json:"exit_code,omitempty" doc:"exit: the exit code, unless a signal ended the process."`
-	DurationMS *int64           `json:"duration_ms,omitempty" doc:"exit: run time in milliseconds."`
-	Error      string           `json:"error,omitempty" doc:"error: what went wrong."`
+	Seq        uint64        `json:"seq" doc:"Sequence number, starting at 1 with no gaps."`
+	Time       time.Time     `json:"time"`
+	Type       api.EventType `json:"type" enum:"started,stdout,stderr,stdin_closed,signal,exit,error,job_started,step_started,step_finished,job_finished"`
+	Data       string        `json:"data,omitempty" doc:"stdout and stderr: the output chunk, when it is valid UTF-8."`
+	DataB64    []byte        `json:"data_b64,omitempty" doc:"stdout and stderr: the output chunk, when it is not valid UTF-8."`
+	PID        int           `json:"pid,omitempty" doc:"started: the process id."`
+	Signal     string        `json:"signal,omitempty" doc:"signal: the signal sent. exit: the signal that ended the process."`
+	State      string        `json:"state,omitempty" doc:"exit: the final session state. step_finished and job_finished: the step's or job's final state."`
+	ExitCode   *int          `json:"exit_code,omitempty" doc:"exit: the exit code, unless a signal ended the process."`
+	DurationMS *int64        `json:"duration_ms,omitempty" doc:"exit: run time in milliseconds."`
+	Error      string        `json:"error,omitempty" doc:"error, step_finished, job_finished: what went wrong."`
+	Step       string        `json:"step,omitempty" doc:"step_started and step_finished: the step name."`
+	SessionID  string        `json:"session_id,omitempty" doc:"step_started and step_finished: the step's session."`
 }
 
 func (s *Server) registerSessions() {
@@ -178,7 +180,7 @@ func (s *Server) registerSessions() {
 		"200": {
 			Description: "The events.",
 			Content: map[string]*huma.MediaType{
-				"application/x-ndjson":     {Schema: reg.Schema(reflect.TypeFor[Event](), true, "Event")},
+				"application/x-ndjson":     {Schema: reg.Schema(reflectEvent, true, "Event")},
 				"text/event-stream":        {Schema: &huma.Schema{Type: "string", Description: "`id: <seq>` and `data: <event JSON>` per event."}},
 				"application/octet-stream": {Schema: &huma.Schema{Type: "string", Format: "binary"}},
 			},
@@ -351,6 +353,22 @@ func (s *Server) sessionStdin(ctx context.Context, in *stdinInput) (*stdinOutput
 	return &stdinOutput{Body: api.StdinResponse{Bytes: n, StdinOpen: sess.StdinOpen}}, nil
 }
 
+// resumeFrom returns the first sequence number to send: after
+// Last-Event-ID when a server-sent events client reconnects, else from.
+func resumeFrom(from uint64, lastEventID string) (uint64, error) {
+	if lastEventID == "" {
+		return from, nil
+	}
+	last, err := strconv.ParseUint(lastEventID, 10, 64)
+	if err != nil {
+		return 0, huma.Error400BadRequest("Last-Event-ID must be a sequence number")
+	}
+	return last + 1, nil
+}
+
+// reflectEvent is the documented shape of an event.
+var reflectEvent = reflect.TypeFor[Event]()
+
 type streamFormat int
 
 const (
@@ -382,13 +400,9 @@ func (s *Server) sessionEvents(ctx context.Context, in *eventsInput) (*streamOut
 	if err != nil {
 		return nil, err
 	}
-	from := in.From
-	if in.LastEventID != "" {
-		last, err := strconv.ParseUint(in.LastEventID, 10, 64)
-		if err != nil {
-			return nil, huma.Error400BadRequest("Last-Event-ID must be a sequence number")
-		}
-		from = last + 1
+	from, err := resumeFrom(in.From, in.LastEventID)
+	if err != nil {
+		return nil, err
 	}
 	format := eventFormat(in)
 	rawStream := api.EventStdout

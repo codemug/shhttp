@@ -51,6 +51,11 @@ Sessions:
   signal <id> <signal>                 send a signal, e.g. INT or SIGHUP
   rm <id>...                           delete sessions and their output
 
+Jobs, queues and templates:
+  job submit|ls|get|watch|logs|cancel|rm
+  queue ls|set|rm
+  template ls|get|put|rm|run
+
 Keys (use the master key):
   key create -name NAME -scope SCOPE [flags]
   key ls | key get <id> | key rotate [-grace D] <id> | key revoke [-kill-sessions] <id>
@@ -100,17 +105,20 @@ func Main(ctx context.Context, args []string, env Env) int {
 
 	cmd, rest := fs.Arg(0), fs.Args()[1:]
 	commands := map[string]func([]string) error{
-		"run":     a.run,
-		"attach":  a.attach,
-		"logs":    a.logs,
-		"ps":      a.ps,
-		"get":     a.get,
-		"kill":    a.kill,
-		"signal":  a.signal,
-		"rm":      a.rm,
-		"key":     a.keyCmd,
-		"whoami":  a.whoami,
-		"version": a.version,
+		"run":      a.run,
+		"attach":   a.attach,
+		"logs":     a.logs,
+		"ps":       a.ps,
+		"get":      a.get,
+		"kill":     a.kill,
+		"signal":   a.signal,
+		"rm":       a.rm,
+		"key":      a.keyCmd,
+		"job":      a.jobCmd,
+		"queue":    a.queueCmd,
+		"template": a.templateCmd,
+		"whoami":   a.whoami,
+		"version":  a.version,
 	}
 	run, ok := commands[cmd]
 	if !ok {

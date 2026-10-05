@@ -220,6 +220,10 @@ type EventsOptions struct {
 // Events yields a session's events. Stop ranging, or cancel ctx, to end the
 // request early. A failure ends the sequence with a non-nil error.
 func (c *Client) Events(ctx context.Context, id string, opts *EventsOptions) iter.Seq2[api.Event, error] {
+	return c.events(ctx, "/v2/sessions/"+url.PathEscape(id)+"/events", opts)
+}
+
+func (c *Client) events(ctx context.Context, path string, opts *EventsOptions) iter.Seq2[api.Event, error] {
 	return func(yield func(api.Event, error) bool) {
 		q := url.Values{}
 		if opts != nil {
@@ -230,7 +234,7 @@ func (c *Client) Events(ctx context.Context, id string, opts *EventsOptions) ite
 				q.Set("follow", "true")
 			}
 		}
-		req, err := c.newRequest(ctx, http.MethodGet, "/v2/sessions/"+url.PathEscape(id)+"/events", q, nil)
+		req, err := c.newRequest(ctx, http.MethodGet, path, q, nil)
 		if err != nil {
 			yield(api.Event{}, err)
 			return

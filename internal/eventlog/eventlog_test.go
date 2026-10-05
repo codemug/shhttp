@@ -156,3 +156,22 @@ func TestFollowHonoursContext(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestOpenAppendContinues(t *testing.T) {
+	l := newLog(t)
+	appendN(t, l, 3)
+	l.Close()
+	r, err := OpenAppend(l.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, err := r.Append(api.Event{Type: api.EventStdout, Data: []byte("line 3\n")}); err != nil || e.Seq != 4 {
+		t.Fatalf("append after reopen: %+v, %v", e, err)
+	}
+	r.Close()
+	again, err := Open(l.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSeqs(t, readAll(t, again, 1), 1, 4)
+}

@@ -242,3 +242,71 @@ func urlOf(t *testing.T, c *client.Client) string {
 	t.Helper()
 	return c.BaseURL()
 }
+
+func TestJobsQueuesTemplates(t *testing.T) {
+	master, _, ctx := setup(t)
+	k, err := master.CreateKey(ctx, api.CreateKeyRequest{Name: "all", Scopes: api.AllScopes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := client.New(master.BaseURL(), k.Secret)
+
+	if _, err := c.PutQueue(ctx, "q", 2); err != nil {
+		t.Fatal(err)
+	}
+	j, err := c.SubmitJob(ctx, api.JobSpec{Queue: "q", Steps: []api.JobStep{{Spec: api.SessionSpec{Argv: []string{"echo", "hi"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last api.Event
+	for e, err := range c.JobEvents(ctx, j.ID, &client.EventsOptions{Follow: true}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = e
+	}
+	if last.Type != api.EventJobFinished || last.State != api.SessionState(api.JobSucceeded) {
+		t.Fatalf("last job event %+v", last)
+	}
+	list, err := c.ListJobs(ctx, &client.JobListOptions{Queue: "q"})
+	if err != nil || len(list.Jobs) != 1 {
+		t.Fatalf("jobs %+v, %v", list, err)
+	}
+	if err := c.DeleteJob(ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteQueue(ctx, "q"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.PutTemplate(ctx, "echo", api.TemplateSpec{
+		Params:  map[string]api.TemplateParam{"word": {}},
+		Session: &api.SessionSpec{Argv: []string{"echo", "{{word}}"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.RunTemplate(ctx, "echo", map[string]string{"word": "templated"})
+	if err != nil || r.Session == nil {
+		t.Fatalf("run template: %+v, %v", r, err)
+	}
+	var out strings.Builder
+	for e, err := range c.Events(ctx, r.Session.ID, &client.EventsOptions{Follow: true}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.Write(e.Data)
+	}
+	if out.String() != "templated\n" {
+		t.Fatalf("template output %q", out.String())
+	}
+	if _, err := c.RunTemplate(ctx, "echo", nil); !client.IsStatus(err, 400) {
+		t.Fatalf("missing parameter: %v", err)
+	}
+	ts, err := c.ListTemplates(ctx)
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("templates %+v, %v", ts, err)
+	}
+	if err := c.DeleteTemplate(ctx, "echo"); err != nil {
+		t.Fatal(err)
+	}
+}
